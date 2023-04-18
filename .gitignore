@@ -1,0 +1,25 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local development files
+venv/
+env/
+*.env
+
+# Logs and databases
+*.log
+*.sqlite3
+*.db
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+*.egg
+
+# Other generated files
+*.swp
+Thumbs.db
+.DS_Store
