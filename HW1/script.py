@@ -1,13 +1,16 @@
 import cv2 as cv
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # Set the backend to Agg
 import matplotlib.pyplot as plt
 import os
 import random
-import timeit
 import time
 from numba import njit, prange
 from joblib import Parallel, delayed
 from scipy.spatial.distance import cdist
+import concurrent.futures
+
 
 
 
@@ -66,7 +69,6 @@ def find_best_matches_numba(distances, threshold=0.8):
 
 def find_best_matches(distances, threshold=0.8):
     best_matches = []
-    
     for i, row in enumerate(distances):
         smallest_indices = np.argpartition(row, 2)[:2]
         smallest_values = sorted((row[j], j) for j in smallest_indices)
@@ -107,7 +109,7 @@ def plot_keypoints(piece, kp):
 
 
 def get_piece_transform(piece, target, warp_type="affine"):
-    global distances_time, best_matches_time
+    #global distances_time, best_matches_time
     # find keypoints and descriptors for the piece and the target
     sift = cv.SIFT_create()
     target_kp, target_des = sift.detectAndCompute(target, None)
@@ -120,8 +122,8 @@ def get_piece_transform(piece, target, warp_type="affine"):
     middle_time = time.time()
     best_matches = find_best_matches_numba(distances, threshold=0.75)
     end_time = time.time()
-    distances_time += middle_time - start_time
-    best_matches_time += end_time - middle_time
+    #distances_time += middle_time - start_time
+    #best_matches_time += end_time - middle_time
     print("Number of best matches: ", len(best_matches))
     #plot_best_matches(pieces[1], target, best_matches, kp, target_kp)
 
@@ -129,10 +131,10 @@ def get_piece_transform(piece, target, warp_type="affine"):
     best_inlier_ratio = 0
     all_src_pts = np.float32([kp[match[0]].pt for match in best_matches]).reshape(-1, 1, 2)
     all_dst_pts = np.float32([target_kp[match[1]].pt for match in best_matches]).reshape(-1, 1, 2)
-    for _ in range(100000):
+    for _ in range(10000):
         # select 3 or 4 random points
         k = 3 if warp_type == "affine" else 4
-        random_matches = random.sample(best_matches, k=3)
+        random_matches = random.sample(best_matches, k=k)
         # calculate transformation matrix
         src_pts = np.float32([kp[match[0]].pt for match in random_matches]).reshape(-1, 1, 2)
         dst_pts = np.float32([target_kp[match[1]].pt for match in random_matches]).reshape(-1, 1, 2)
@@ -142,6 +144,8 @@ def get_piece_transform(piece, target, warp_type="affine"):
             M = cv.getPerspectiveTransform(src_pts, dst_pts)
         # calculate the residuals for all the points
         transformed_points = cv.transform(all_src_pts, M)
+        if warp_type == "homography":
+            transformed_points = transformed_points[:, :, :2] / transformed_points[:, :, 2:3]
         #residuals = [euclidean_distance(tp, dp) for tp, dp in zip(transformed_points, all_dst_pts)]
         # Calculate the distance between transformed points and their corresponding points in the target image
         residuals = np.linalg.norm(transformed_points - all_dst_pts, axis=2)
@@ -154,10 +158,11 @@ def get_piece_transform(piece, target, warp_type="affine"):
     print("best_inlier_ratio: ", best_inlier_ratio)
     if warp_type == "affine":
         transform = np.vstack((transform, np.array([0, 0, 1])))
-    return transform
+    return transform, best_inlier_ratio > 0.1
 
 
 def solve_puzzle(directory):
+    print("Solving puzzle: ", os.path.basename(directory))
     warp_type = os.path.basename(directory).split('_')[1]
     pieces_dir = os.path.join(directory, 'pieces')
     # find the txt file in the directory using a one-liner given there is only one
@@ -178,10 +183,16 @@ def solve_puzzle(directory):
     target = cv.warpPerspective(pieces[0], global_transform, (target_width, target_height), flags=cv.INTER_CUBIC)
     target_mask = cv.warpPerspective(np.ones_like(gray_pieces[0]), global_transform, (target_width, target_height), flags=cv.INTER_CUBIC)
     
+    transformed_pieces = [target.copy()]
+    total_successes = 1
     for i in range(1, len(pieces)):
         print(f"Processing piece: {i} of {len(pieces)}")
         # find the transformation matrix for the piece
-        transform = get_piece_transform(gray_pieces[i], gray_target)
+        transform, success = get_piece_transform(gray_pieces[i], gray_target, warp_type=warp_type)
+
+        if not success:
+            continue
+        total_successes += 1
 
         # apply the transformation matrix to the test piece
         transformed_piece = cv.warpPerspective(pieces[i], transform, (target_width, target_height), flags=cv.INTER_CUBIC)
@@ -191,34 +202,49 @@ def solve_puzzle(directory):
         gray_target[gray_target == 0] = gray_transformed_piece[gray_target == 0]
         target_mask[gray_transformed_piece != 0] += 1
 
-    print("Time to calculate distances: ", distances_time)
-    print("Time to find best matches: ", best_matches_time)
+        transformed_pieces.append(transformed_piece)
 
-    cv.imshow("Puzzle Cover Mask", target_mask * 10)
-    cv.imshow("Complete Puzzle", target)
+    #print("Time to calculate distances: ", distances_time)
+    #print("Time to find best matches: ", best_matches_time)
+
+    saving_dir = os.path.join("results", os.path.basename(directory))
+    if not os.path.exists(saving_dir):
+        os.makedirs(saving_dir)
+
+    for i, piece in enumerate(transformed_pieces):
+        cv.imwrite(os.path.join(saving_dir, f"piece_{i+1}_relative.jpeg"), piece)
+    
+    cv.imwrite(os.path.join(saving_dir, f"solution_{total_successes}_{len(pieces)}.jpeg"), target)
+
+    # Plot the coverage mask
+    plt.figure()
+    plt.imshow(target_mask, vmin=0, vmax=np.max(target_mask))
+    plt.colorbar()
+    plt.title("coverage count")
+    # Save the plot as a JPEG file
+    plt.savefig(os.path.join(saving_dir, "coverage_count.jpeg"), format='jpeg')
+    # Clear the current figure
+    plt.clf()
+
+    print("Done solving puzzle: ", os.path.basename(directory))
 
 
-
-
-
-def time_function():
-    # Create a sample distances matrix
-    distances = np.random.rand(1000, 1000)
-
-    # Measure the performance of the function
-    num_runs = 1000
-    total_time = timeit.timeit(lambda: find_best_matches_numba(distances), number=num_runs)
-
-    print(f"Total time for {num_runs} runs: {total_time:.4f} seconds")
-    print(f"Average time per run: {total_time / num_runs:.8f} seconds")
 
 distances_time = 0
 best_matches_time = 0
 
-def main():
+def solve_all_puzzles():
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        puzzle_dirs = [os.path.join('puzzles', puzzle_path) for puzzle_path in os.listdir('puzzles')]
+        print(os.listdir('puzzles'))
+        executor.map(solve_puzzle, puzzle_dirs)
     
-    solve_puzzle('puzzles/puzzle_homography_2')
-    cv.waitKey(0)
+    print('done')
+
+def main():
+    solve_all_puzzles()
+    #solve_puzzle('puzzles/puzzle_homography_4')
+    #cv.waitKey(0)
     print('done')
 
 
