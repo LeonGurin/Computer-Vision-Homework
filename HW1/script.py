@@ -140,17 +140,16 @@ def get_piece_transform(piece, target, warp_type="affine"):
         dst_pts = np.float32([target_kp[match[1]].pt for match in random_matches]).reshape(-1, 1, 2)
         if warp_type == "affine":
             M = cv.getAffineTransform(src_pts, dst_pts)
+            transformed_points = cv.transform(all_src_pts, M)
         else:
             M = cv.getPerspectiveTransform(src_pts, dst_pts)
+            transformed_points = cv.perspectiveTransform(all_src_pts, M)
         # calculate the residuals for all the points
-        transformed_points = cv.transform(all_src_pts, M)
-        if warp_type == "homography":
-            transformed_points = transformed_points[:, :, :2] / transformed_points[:, :, 2:3]
-        #residuals = [euclidean_distance(tp, dp) for tp, dp in zip(transformed_points, all_dst_pts)]
+        
         # Calculate the distance between transformed points and their corresponding points in the target image
         residuals = np.linalg.norm(transformed_points - all_dst_pts, axis=2)
         # if the number of inliers is larger than the current best, update the best
-        inliers = residuals < 4
+        inliers = residuals < 5
         inlier_ratio = np.sum(inliers) / len(residuals)
         if inlier_ratio > best_inlier_ratio:
             best_inlier_ratio = inlier_ratio
@@ -243,7 +242,7 @@ def solve_all_puzzles():
 
 def main():
     solve_all_puzzles()
-    #solve_puzzle('puzzles/puzzle_homography_4')
+    #solve_puzzle('puzzles/puzzle_homography_3')
     #cv.waitKey(0)
     print('done')
 
