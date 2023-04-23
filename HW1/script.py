@@ -3,30 +3,80 @@ import numpy as np
 import matplotlib.pyplot as plt
 import os
 import random
+import timeit
+import time
+from numba import njit, prange
+from joblib import Parallel, delayed
+from scipy.spatial.distance import cdist
+
 
 
 # functions
+# def euclidean_distance(p1, p2):
+#     return np.linalg.norm(p1 - p2)
 
-def euclidean_distance(p1, p2):
-    return np.linalg.norm(p1 - p2)
+@njit
+def euclidean_distance(des1, des2):
+    return np.sqrt(np.sum((des1 - des2) ** 2))
 
 def calculate_distances_matrix(descriptors1, descriptors2):
-    distances = np.zeros((len(descriptors1), len(descriptors2)))
-    for i, des1 in enumerate(descriptors1):
-        for j, des2 in enumerate(descriptors2):
-            distances[i, j] = euclidean_distance(des1, des2)
+    diff = descriptors1[:, np.newaxis, :] - descriptors2[np.newaxis, :, :]
+    squared_diff = diff ** 2
+    distances = np.sqrt(np.sum(squared_diff, axis=-1))
     return distances
+
+@njit
+def calculate_distances_matrix_numba(descriptors1, descriptors2):
+    n_rows, n_cols = len(descriptors1), len(descriptors2)
+    distances = np.empty((n_rows, n_cols))
+    for i in range(n_rows):
+        for j in range(n_cols):
+            distances[i, j] = euclidean_distance(descriptors1[i], descriptors2[j])
+
+    return distances
+
+def calculate_distances_matrix_scipy(descriptors1, descriptors2):
+    return cdist(descriptors1, descriptors2, metric='euclidean')
+
+
+@njit
+def find_best_matches_numba(distances, threshold=0.8):
+    n_rows, n_cols = distances.shape
+    best_matches = []
+
+    for i in range(n_rows):
+        # Initialize the smallest and second smallest values and their indices
+        min_val, second_min_val = np.inf, np.inf
+        min_idx, second_min_idx = -1, -1
+
+        # Find the two smallest values and their indices in the row
+        for j in range(n_cols):
+            if distances[i, j] < min_val:
+                second_min_val = min_val
+                min_val = distances[i, j]
+                min_idx = j
+            elif distances[i, j] < second_min_val:
+                second_min_val = distances[i, j]
+
+        # Check the condition and append to the best_matches list
+        if min_val < threshold * second_min_val:
+            best_matches.append((i, min_idx))
+
+    return best_matches
 
 def find_best_matches(distances, threshold=0.8):
     best_matches = []
-    for i, dist in enumerate(distances):
-        sorted_dist = np.argsort(dist)
-        min_value = dist[sorted_dist[0]]
-        second_min_value = dist[sorted_dist[1]]
+    
+    for i, row in enumerate(distances):
+        smallest_indices = np.argpartition(row, 2)[:2]
+        smallest_values = sorted((row[j], j) for j in smallest_indices)
+        min_value, idx = smallest_values[0]
+        second_min_value = smallest_values[1][0]
+        
         if min_value < threshold * second_min_value:
-            best_matches.append((i, sorted_dist[0]))
+            best_matches.append((i, idx))
+            
     return best_matches
-
 
 def read_sorted_pieces(pieces_dir):
     # Custom sorting function to extract the serial number from the filename
@@ -49,10 +99,66 @@ def read_sorted_pieces(pieces_dir):
 def plot_best_matches(piece1, piece2, best_matches, kp1, kp2):
     dm_best_matches = [cv.DMatch(_queryIdx=m[0], _trainIdx=m[1], _imgIdx=0, _distance=0) for m in best_matches]
     result = cv.drawMatches(piece1, kp1, piece2, kp2, dm_best_matches, None, flags=cv.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS)
-
     plt.imshow(result), plt.show()
 
+def plot_keypoints(piece, kp):
+    result = cv.drawKeypoints(piece, kp, None)
+    plt.imshow(result), plt.show()
+
+
+def get_piece_transform(piece, target, warp_type="affine"):
+    global distances_time, best_matches_time
+    # find keypoints and descriptors for the piece and the target
+    sift = cv.SIFT_create()
+    target_kp, target_des = sift.detectAndCompute(target, None)
+    kp, des = sift.detectAndCompute(piece, None)
+    #plot_keypoints(piece, kp)
+    print("Number of keypoints in first piece: ", len(kp))
+
+    start_time = time.time()
+    distances = calculate_distances_matrix_scipy(des, target_des)
+    middle_time = time.time()
+    best_matches = find_best_matches_numba(distances, threshold=0.75)
+    end_time = time.time()
+    distances_time += middle_time - start_time
+    best_matches_time += end_time - middle_time
+    print("Number of best matches: ", len(best_matches))
+    #plot_best_matches(pieces[1], target, best_matches, kp, target_kp)
+
+    # implement RANSAC to find the best transformation matrix
+    best_inlier_ratio = 0
+    all_src_pts = np.float32([kp[match[0]].pt for match in best_matches]).reshape(-1, 1, 2)
+    all_dst_pts = np.float32([target_kp[match[1]].pt for match in best_matches]).reshape(-1, 1, 2)
+    for _ in range(100000):
+        # select 3 or 4 random points
+        k = 3 if warp_type == "affine" else 4
+        random_matches = random.sample(best_matches, k=3)
+        # calculate transformation matrix
+        src_pts = np.float32([kp[match[0]].pt for match in random_matches]).reshape(-1, 1, 2)
+        dst_pts = np.float32([target_kp[match[1]].pt for match in random_matches]).reshape(-1, 1, 2)
+        if warp_type == "affine":
+            M = cv.getAffineTransform(src_pts, dst_pts)
+        else:
+            M = cv.getPerspectiveTransform(src_pts, dst_pts)
+        # calculate the residuals for all the points
+        transformed_points = cv.transform(all_src_pts, M)
+        #residuals = [euclidean_distance(tp, dp) for tp, dp in zip(transformed_points, all_dst_pts)]
+        # Calculate the distance between transformed points and their corresponding points in the target image
+        residuals = np.linalg.norm(transformed_points - all_dst_pts, axis=2)
+        # if the number of inliers is larger than the current best, update the best
+        inliers = residuals < 4
+        inlier_ratio = np.sum(inliers) / len(residuals)
+        if inlier_ratio > best_inlier_ratio:
+            best_inlier_ratio = inlier_ratio
+            transform = M
+    print("best_inlier_ratio: ", best_inlier_ratio)
+    if warp_type == "affine":
+        transform = np.vstack((transform, np.array([0, 0, 1])))
+    return transform
+
+
 def solve_puzzle(directory):
+    warp_type = os.path.basename(directory).split('_')[1]
     pieces_dir = os.path.join(directory, 'pieces')
     # find the txt file in the directory using a one-liner given there is only one
     txt_file = [f for f in os.listdir(directory) if f.endswith('.txt')][0]
@@ -73,64 +179,45 @@ def solve_puzzle(directory):
     target_mask = cv.warpPerspective(np.ones_like(gray_pieces[0]), global_transform, (target_width, target_height), flags=cv.INTER_CUBIC)
     
     for i in range(1, len(pieces)):
-
-        # find keypoints and descriptors for all pieces
-        sift = cv.SIFT_create()
-        #kp, des = zip(*[sift.detectAndCompute(piece, None) for piece in gray_pieces])
-        target_kp, target_des = sift.detectAndCompute(gray_target, None)
-        kp, des = sift.detectAndCompute(gray_pieces[i], None)
-
-        # plot keypoints for a single test piece
-        test_piece = cv.drawKeypoints(pieces[i], kp, None)
-        cv.imshow("First Piece Keypoints", test_piece)
-        print("Number of keypoints in first piece: ", len(kp))
-
-        distances = calculate_distances_matrix(des, target_des)
-        best_matches = find_best_matches(distances, threshold=0.75)
-        print("Number of best matches: ", len(best_matches))
-        #plot_best_matches(pieces[1], target, best_matches, kp, target_kp)
-
-        # implement RANSAC to find the best transformation matrix
-        best_error = np.inf
-        all_src_pts = np.float32([kp[match[0]].pt for match in best_matches]).reshape(-1, 1, 2)
-        all_dst_pts = np.float32([target_kp[match[1]].pt for match in best_matches]).reshape(-1, 1, 2)
-        for _ in range(1000):
-            # select 3 random points
-            random_matches = random.sample(best_matches, k=3)
-            # calculate transformation matrix
-            src_pts = np.float32([kp[match[0]].pt for match in random_matches]).reshape(-1, 1, 2)
-            dst_pts = np.float32([target_kp[match[1]].pt for match in random_matches]).reshape(-1, 1, 2)
-            M = cv.getAffineTransform(src_pts, dst_pts)
-            # calculate the residuals for all the points
-            transformed_points = cv.transform(all_src_pts, M)
-            residuals = [euclidean_distance(tp, dp) for tp, dp in zip(transformed_points, all_dst_pts)]
-            error = np.mean(residuals)
-            # if the number of inliers is larger than the current best, update the best
-            if error < best_error:
-                best_error = error
-                transform = M
-            
-
+        print(f"Processing piece: {i} of {len(pieces)}")
+        # find the transformation matrix for the piece
+        transform = get_piece_transform(gray_pieces[i], gray_target)
 
         # apply the transformation matrix to the test piece
-        transform = np.vstack((transform, np.array([0, 0, 1])))
-        print("Transformation matrix: ", transform)
         transformed_piece = cv.warpPerspective(pieces[i], transform, (target_width, target_height), flags=cv.INTER_CUBIC)
         gray_transformed_piece = cv.warpPerspective(gray_pieces[i], transform, (target_width, target_height), flags=cv.INTER_CUBIC)
         #cv.imshow("Transformed Piece", transformed_piece)
         target[gray_target == 0] = transformed_piece[gray_target == 0]
         gray_target[gray_target == 0] = gray_transformed_piece[gray_target == 0]
-        #target = cv.add(target, transformed_piece)
+        target_mask[gray_transformed_piece != 0] += 1
 
-    cv.imshow("Final Image", target)
+    print("Time to calculate distances: ", distances_time)
+    print("Time to find best matches: ", best_matches_time)
+
+    cv.imshow("Puzzle Cover Mask", target_mask * 10)
+    cv.imshow("Complete Puzzle", target)
 
 
 
 
 
+def time_function():
+    # Create a sample distances matrix
+    distances = np.random.rand(1000, 1000)
+
+    # Measure the performance of the function
+    num_runs = 1000
+    total_time = timeit.timeit(lambda: find_best_matches_numba(distances), number=num_runs)
+
+    print(f"Total time for {num_runs} runs: {total_time:.4f} seconds")
+    print(f"Average time per run: {total_time / num_runs:.8f} seconds")
+
+distances_time = 0
+best_matches_time = 0
 
 def main():
-    solve_puzzle('puzzles/puzzle_affine_5')
+    
+    solve_puzzle('puzzles/puzzle_homography_2')
     cv.waitKey(0)
     print('done')
 
