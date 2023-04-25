@@ -13,9 +13,89 @@ import concurrent.futures
 import sys
 import argparse
 
-# functions
-# def euclidean_distance(p1, p2):
-#     return np.linalg.norm(p1 - p2)
+class Args:
+    def __init__(self, path="puzzle_affine_1", best_match_threshold=0.75, distance_threshold=0.8, 
+                 max_iterations=1000, inlier_ratio_threshold=0.7):     
+        # global   
+        self.puzzle_dir = f'puzzles/{path}'
+        self.inlier_ratio_threshold = inlier_ratio_threshold
+        self.save_results = True
+
+        # optimizable
+        self.max_iterations = max_iterations
+        self.distance_threshold = distance_threshold
+        self.best_match_threshold = best_match_threshold
+        # self.nfeatures = 1000
+        # self.nOctaveLayers = 3
+        # self.contrastThreshold = 0.04
+        # self.edgeThreshold = 10
+        # self.sigma = 1.6
+        # self.nOctaves = 4
+
+global_parameter_dict = {
+    # name : argument_class
+    "puzzle_affine_1" : Args(path="puzzle_affine_1",
+                                best_match_threshold=0.6587871921513252	,
+                                distance_threshold=1.5324645171825062, max_iterations=8430),
+    "puzzle_affine_2" : Args(path="puzzle_affine_2",
+                                best_match_threshold=0.5832602295752696,
+                                distance_threshold=2.202223244046155, max_iterations=332),
+    "puzzle_affine_3" : Args(path="puzzle_affine_3",
+                                best_match_threshold=0.7276081513407421,
+                                distance_threshold=6.233503754655816, max_iterations=7000),
+    "puzzle_affine_4" : Args(path="puzzle_affine_4",
+                                best_match_threshold=0.5842847329836567,
+                                distance_threshold=9.431308022134985, max_iterations=509),
+    "puzzle_affine_5" : Args(path="puzzle_affine_5",
+                                best_match_threshold=0.7152294465942753,
+                                distance_threshold=3.626892788762311, max_iterations=1328),
+    "puzzle_affine_6" : Args(path="puzzle_affine_6",
+                                best_match_threshold=0.7447763099489678	,
+                                distance_threshold=2.851772236642097, max_iterations=1511),
+    "puzzle_affine_7" : Args(path="puzzle_affine_7",
+                                best_match_threshold=0.7658479335174776,
+                                distance_threshold=4.006109810211821, max_iterations=6351),
+    "puzzle_affine_8" : Args(path="puzzle_affine_8",
+                                best_match_threshold=0.8112395262678997,
+                                distance_threshold=7.935950795434342, max_iterations=8583),
+    "puzzle_affine_9" : Args(path="puzzle_affine_9",
+                                best_match_threshold=0.7687249392476592	,
+                                distance_threshold=9.542647514653458, max_iterations=5968),
+    "puzzle_affine_10" : Args(path="puzzle_affine_10",
+                                best_match_threshold=0.8003499034471291,
+                                distance_threshold=9.99854409971463, max_iterations=4716),
+    "puzzle_homography_1" : Args(path="puzzle_homography_1",
+                                    best_match_threshold=0.7024362563451954,
+                                    distance_threshold=1.8029022826284689, max_iterations=7701),
+    "puzzle_homography_2" : Args(path="puzzle_homography_2",
+                                    best_match_threshold=0.6883759140569075,
+                                    distance_threshold=4.206968700684664, max_iterations=441),
+    "puzzle_homography_3" : Args(path="puzzle_homography_3",
+                                    best_match_threshold=0.5371183336382568,
+                                    distance_threshold=8.780993457234663, max_iterations=450),
+    "puzzle_homography_4" : Args(path="puzzle_homography_4",
+                                    best_match_threshold=0.5879578848801965,
+                                    distance_threshold=6.32746793609563, max_iterations=2112),
+    "puzzle_homography_5" : Args(path="puzzle_homography_5",
+                                    best_match_threshold=0.5879578848801965,
+                                    distance_threshold=6.32746793609563, max_iterations=2112),
+    "puzzle_homography_6" : Args(path="puzzle_homography_6",
+                                    best_match_threshold=0.7122980545207351,
+                                    distance_threshold=1.304495622447408, max_iterations=1008),
+    "puzzle_homography_7" : Args(path="puzzle_homography_7",
+                                    best_match_threshold=0.792444874986506,
+                                    distance_threshold=2.221007880749851, max_iterations=4901),
+    "puzzle_homography_8" : Args(path="puzzle_homography_8",
+                                    best_match_threshold=0.8032002888588037,
+                                    distance_threshold=9.382478888921057, max_iterations=5852),
+    "puzzle_homography_9" : Args(path="puzzle_homography_9",
+                                    best_match_threshold=0.8032002888588037,
+                                    distance_threshold=9.382478888921057, max_iterations=5852),
+    "puzzle_homography_10" : Args(path="puzzle_homography_10",
+                                    best_match_threshold=0.7941763711163423,
+                                    distance_threshold=7.869858946700251, max_iterations=7752),
+}
+
 
 @njit
 def euclidean_distance(des1, des2):
@@ -91,7 +171,7 @@ def read_sorted_pieces(pieces_dir):
 
     pieces = []
     for filename in sorted_filenames:
-        print("Reading piece: ", filename)
+        # print("Reading piece: ", filename)
         img = cv.imread(os.path.join(pieces_dir, filename))
         pieces.append(img)
     
@@ -133,7 +213,7 @@ def get_piece_transform(piece, target, warp_type, args):
     target_kp, target_des = sift.detectAndCompute(target, None)
     kp, des = sift.detectAndCompute(piece, None)
     #plot_keypoints(piece, kp)
-    print("Number of keypoints in first piece: ", len(kp))
+    # print("Number of keypoints in first piece: ", len(kp))
 
     #start_time = time.time()
     distances = calculate_distances_matrix_scipy(des, target_des)
@@ -142,7 +222,7 @@ def get_piece_transform(piece, target, warp_type, args):
     #end_time = time.time()
     #distances_time += middle_time - start_time
     #best_matches_time += end_time - middle_time
-    print("Number of best matches: ", len(best_matches))
+    # print("Number of best matches: ", len(best_matches))
     #plot_best_matches(pieces[1], target, best_matches, kp, target_kp)
 
     # implement RANSAC to find the best transformation matrix
@@ -174,14 +254,14 @@ def get_piece_transform(piece, target, warp_type, args):
         if inlier_ratio > best_inlier_ratio:
             best_inlier_ratio = inlier_ratio
             transform = M
-    print("best_inlier_ratio: ", best_inlier_ratio)
+    # print("best_inlier_ratio: ", best_inlier_ratio)
     if warp_type == "affine":
         transform = np.vstack((transform, np.array([0, 0, 1])))
     return transform, best_inlier_ratio > args.inlier_ratio_threshold
 
 
 def solve_puzzle(directory, args):
-    print("Solving puzzle: ", os.path.basename(directory))
+    # print("Solving puzzle: ", os.path.basename(directory))
     warp_type = os.path.basename(directory).split('_')[1] # affine or homography
     pieces_dir = os.path.join(directory, 'pieces')
     # find the txt file in the directory using a one-liner given there is only one
@@ -204,7 +284,7 @@ def solve_puzzle(directory, args):
     
     transformed_pieces = [target.copy()]
     for i in range(1, len(pieces)):
-        print(f"Processing piece: {i} of {len(pieces)}")
+        # print(f"Processing piece: {i} of {len(pieces)}")
         # find the transformation matrix for the piece
         transform, success = get_piece_transform(gray_pieces[i], gray_target, warp_type, args)
 
@@ -229,26 +309,17 @@ def solve_puzzle(directory, args):
         output_dir = os.path.join("results", os.path.basename(directory))
         save_results(output_dir, pieces, target, target_mask, transformed_pieces)
 
-    print("Done solving puzzle: ", os.path.basename(directory))
+    # print("Done solving puzzle: ", os.path.basename(directory))
     return len(transformed_pieces) / len(pieces)
-
-
-
-
-# distances_time = 0
-# best_matches_time = 0
 
 def solve_all_puzzles(args):
     # solve all puzzles in parallel
     with concurrent.futures.ThreadPoolExecutor() as executor:
         puzzle_dirs = [os.path.join('puzzles', puzzle_path) for puzzle_path in os.listdir(args.puzzle_dir)]
-        print(os.listdir(args.puzzle_dir))
-        executor.map(solve_puzzle, puzzle_dirs, [args] * len(puzzle_dirs))
+        args = [global_parameter_dict[puzzle_path] for puzzle_path in os.listdir(args.puzzle_dir)]
+        print(os.listdir(args[0].puzzle_dir))
+        executor.map(solve_puzzle, puzzle_dirs, args)
     
-
-
-
-
 def parse_args(argv):
     parser = argparse.ArgumentParser(description='Solve a puzzle')
     parser.add_argument('--puzzle_dir', type=str, default='puzzles', help='path to the puzzle directory. If not specified, all puzzles in the puzzles directory will be solved')
@@ -273,11 +344,8 @@ def main():
         solve_puzzle(args.puzzle_dir, args)
     else:
         solve_all_puzzles(args)
-    #solve_puzzle('puzzles/puzzle_homography_3')
     #cv.waitKey(0)
-    print('done')
-
-
+    # print('done')
 
 if __name__ == '__main__':
     main()
