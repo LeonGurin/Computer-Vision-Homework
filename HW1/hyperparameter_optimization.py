@@ -3,7 +3,7 @@ from optuna.pruners import MedianPruner
 from optuna.samplers import TPESampler
 from optuna.visualization import plot_optimization_history, plot_param_importances
 import time
-import sys
+import sys, os
 import argparse
 from script import solve_puzzle
 
@@ -29,7 +29,7 @@ class Args:
         self.best_match_threshold = 0.75
 
     def sample_params(self, trial):
-        self.max_iterations = trial.suggest_int('max_iterations', 100, 10000)
+        self.max_iterations = trial.suggest_int('max_iterations', 100, 3000)
         self.distance_threshold = trial.suggest_uniform('distance_threshold', 0.5, 10.0)
         # self.nfeatures = trial.suggest_int('nfeatures', 100, 1000)
         # self.nOctaveLayers = trial.suggest_int('nOctaveLayers', 1, 10)
@@ -45,7 +45,7 @@ def objective(trial):
     pieces_solved_ratio = solve_puzzle(args.puzzle_dir, args)
     return pieces_solved_ratio
 
-def main():
+def run_study():
     # Select the sampler, can be random, TPESampler, CMAES, ...
     sampler = TPESampler()
 
@@ -73,21 +73,21 @@ def main():
     # Write report
     study.trials_dataframe().to_csv(f"study_results_{PUZZLE}.csv")
 
-    fig1 = plot_optimization_history(study)
-    fig2 = plot_param_importances(study)
-
-    fig1.show()
-    fig2.show()
-    print(study.best_params)
+    return study.best_params
 
 def args_parser(argv):
     parser = argparse.ArgumentParser(description='Optimize hyperparameters')
-    parser.add_argument('--puzzle', type=str, default='puzzle_affine_7', help='puzzle name')
+    parser.add_argument('--puzzle', type=str, default='', help='puzzle name')
     args=parser.parse_args(argv)
     return args
 
 
 if __name__ == '__main__':
     args = args_parser(sys.argv[1:])
-    PUZZLE = args.puzzle
-    main()
+    if args.puzzle:
+        PUZZLE = args.puzzle
+        run_study()
+    else:
+        for puzzle in os.listdir('puzzles'):
+            PUZZLE = puzzle
+            run_study()
