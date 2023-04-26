@@ -12,16 +12,20 @@ PUZZLE='puzzle_affine_7'
 
 class Args:
     def __init__(self, path="puzzle_affine_1", best_match_threshold=0.75, distance_threshold=0.8, 
-                 max_iterations=1000):     
+                 max_iterations=1000, inlier_ratio_threshold=0.75, min_required_matches=10,
+                 window_size=3, window_step=2):     
         # global   
-        self.puzzle_dir = f'puzzles/{path}'
-        self.inlier_ratio_threshold = 0.5
+        self.puzzle_dir = f'puzzles/{PUZZLE}'
+        self.inlier_ratio_threshold = inlier_ratio_threshold
         self.save_results = False
 
         # optimizable
         self.max_iterations = max_iterations
         self.distance_threshold = distance_threshold
         self.best_match_threshold = best_match_threshold
+        self.min_required_matches = min_required_matches
+        self.window_size = window_size
+        self.window_step = window_step
         # self.nfeatures = 1000
         # self.nOctaveLayers = 3
         # self.contrastThreshold = 0.04
@@ -31,14 +35,17 @@ class Args:
 
 def sample_params(args, trial):
     args.max_iterations = trial.suggest_int('max_iterations', 100, 3000)
-    args.distance_threshold = trial.suggest_uniform('distance_threshold', 0.5, 10.0)
+    args.distance_threshold = trial.suggest_float('distance_threshold', 0.5, 10.0)
     # args.nfeatures = trial.suggest_int('nfeatures', 100, 1000)
     # args.nOctaveLayers = trial.suggest_int('nOctaveLayers', 1, 10)
     # args.contrastThreshold = trial.suggest_uniform('contrastThreshold', 0.01, 0.1)
     # args.edgeThreshold = trial.suggest_int('edgeThreshold', 1, 10)
     # args.sigma = trial.suggest_uniform('sigma', 1.0, 2.0)
     # args.nOctaves = trial.suggest_int('nOctaves', 1, 10)
-    args.best_match_threshold = trial.suggest_uniform('best_match_threshold', 0.5, 1.0)
+    args.best_match_threshold = trial.suggest_float('best_match_threshold', 0.5, 1.0)
+    args.min_required_matches = trial.suggest_int('min_required_matches', 4, 40)
+    args.window_size = trial.suggest_float('window_size', 1, 3)
+    args.window_step = trial.suggest_float('window_step', 1, 4)
 
 def objective(trial):
     args = Args()
@@ -72,7 +79,9 @@ def run_study():
         print(f"    {key}: {value}")
 
     # Write report
-    study.trials_dataframe().to_csv(f"study_results_{PUZZLE}.csv")
+    if not os.path.exists('study_results'):
+        os.makedirs('study_results')
+    study.trials_dataframe().to_csv(f"study_results/study_results_{PUZZLE}.csv")
 
     return study.best_params
 

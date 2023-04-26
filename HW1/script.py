@@ -15,7 +15,8 @@ import argparse
 
 class Args:
     def __init__(self, path="puzzle_affine_1", best_match_threshold=0.75, distance_threshold=0.8, 
-                 max_iterations=1000, inlier_ratio_threshold=0.7):     
+                 max_iterations=1000, inlier_ratio_threshold=0.75, min_required_matches=10,
+                 window_size=3, window_step=2):     
         # global   
         self.puzzle_dir = f'puzzles/{path}'
         self.inlier_ratio_threshold = inlier_ratio_threshold
@@ -25,6 +26,9 @@ class Args:
         self.max_iterations = max_iterations
         self.distance_threshold = distance_threshold
         self.best_match_threshold = best_match_threshold
+        self.min_required_matches = min_required_matches
+        self.window_size = window_size
+        self.window_step = window_step
         # self.nfeatures = 1000
         # self.nOctaveLayers = 3
         # self.contrastThreshold = 0.04
@@ -205,25 +209,44 @@ def plot_keypoints(piece, kp):
     result = cv.drawKeypoints(piece, kp, None)
     plt.imshow(result), plt.show()
 
-
-def get_piece_transform(piece, target, warp_type, args):
-    #global distances_time, best_matches_time
-    # find keypoints and descriptors for the piece and the target
+def find_features(piece, target, args):
     sift = cv.SIFT_create()
-    target_kp, target_des = sift.detectAndCompute(target, None)
+    # Detect keypoints and compute descriptors for the piece
     kp, des = sift.detectAndCompute(piece, None)
     #plot_keypoints(piece, kp)
-    # print("Number of keypoints in first piece: ", len(kp))
 
-    #start_time = time.time()
-    distances = calculate_distances_matrix_scipy(des, target_des)
-    #middle_time = time.time()
-    best_matches = find_best_matches_numba(distances, threshold=args.best_match_threshold)
-    #end_time = time.time()
-    #distances_time += middle_time - start_time
-    #best_matches_time += end_time - middle_time
-    # print("Number of best matches: ", len(best_matches))
-    #plot_best_matches(pieces[1], target, best_matches, kp, target_kp)
+    # Define sliding window parameters
+    window_width = int(max(piece.shape[1], piece.shape[0]) * args.window_size)
+    window_height = window_width
+    step_size = int(window_width // args.window_step)
+
+    # Iterate through the target image using a sliding window
+    for y in range(0, target.shape[0] - window_height, step_size):
+        for x in range(0, target.shape[1] - window_width, step_size):
+            # Create a mask for the current region
+            mask = np.zeros(target.shape, dtype=np.uint8)
+            mask[y:y + window_height, x:x + window_width] = 1
+
+            # Detect keypoints and compute descriptors for the target image with the mask
+            target_kp, target_des = sift.detectAndCompute(target, mask)
+            if target_des is None:
+                continue
+            distances = calculate_distances_matrix_scipy(des, target_des)
+            best_matches = find_best_matches_numba(distances, threshold=args.best_match_threshold)
+
+            # Check if there are enough matches
+            if len(best_matches) >= args.min_required_matches:
+                #print(f"Found enough ({len(best_matches)}) matches in region ({x}, {y})")
+                #plot_best_matches(pieces[1], target, best_matches, kp, target_kp)
+                return kp, target_kp, best_matches
+    
+    return None, None, None
+
+def get_piece_transform(piece, target, warp_type, args):
+    # find keypoints and descriptors
+    kp, target_kp, best_matches = find_features(piece, target, args)
+    if kp is None:
+        return None, False
 
     # implement RANSAC to find the best transformation matrix
     best_inlier_ratio = -1
@@ -254,14 +277,20 @@ def get_piece_transform(piece, target, warp_type, args):
         if inlier_ratio > best_inlier_ratio:
             best_inlier_ratio = inlier_ratio
             transform = M
+            if best_inlier_ratio > 0.99:
+                break
     # print("best_inlier_ratio: ", best_inlier_ratio)
     if warp_type == "affine":
         transform = np.vstack((transform, np.array([0, 0, 1])))
     return transform, best_inlier_ratio > args.inlier_ratio_threshold
 
 
+
+
+
+
 def solve_puzzle(directory, args):
-    # print("Solving puzzle: ", os.path.basename(directory))
+    print("Solving puzzle: ", os.path.basename(directory))
     warp_type = os.path.basename(directory).split('_')[1] # affine or homography
     pieces_dir = os.path.join(directory, 'pieces')
     # find the txt file in the directory using a one-liner given there is only one
@@ -289,6 +318,7 @@ def solve_puzzle(directory, args):
         transform, success = get_piece_transform(gray_pieces[i], gray_target, warp_type, args)
 
         if not success:
+            #print(f"Failed to find a good transformation matrix for piece {i}")
             continue
 
         # apply the transformation matrix to the test piece
@@ -309,7 +339,7 @@ def solve_puzzle(directory, args):
         output_dir = os.path.join("results", os.path.basename(directory))
         save_results(output_dir, pieces, target, target_mask, transformed_pieces)
 
-    # print("Done solving puzzle: ", os.path.basename(directory))
+    print(f"Done solving puzzle {os.path.basename(directory)}, with {len(transformed_pieces)} pieces out of {len(pieces)}")
     return len(transformed_pieces) / len(pieces)
 
 def solve_all_puzzles(args):
@@ -325,6 +355,9 @@ def parse_args(argv):
     parser.add_argument('--puzzle_dir', type=str, default='puzzles', help='path to the puzzle directory. If not specified, all puzzles in the puzzles directory will be solved')
     parser.add_argument('--max_iterations', type=int, default=1000, help='maximum number of iterations for RANSAC')
     parser.add_argument('--distance_threshold', type=float, default=5.0, help='maximum distance between two features to be considered a match')
+    parser.add_argument('--min_required_matches', type=int, default=20, help='minimum number of matches required to calculate the transformation matrix')
+    parser.add_argument('--window_size', type=int, default=3, help='window size for the non-maximum suppression in the sift detector')
+    parser.add_argument('--window_step', type=int, default=2, help='window step for the non-maximum suppression in the sift detector')
     parser.add_argument('--nfeatures', type=int, default=0, help='number of features to detect')
     parser.add_argument('--nOctaveLayers', type=int, default=3, help='number of octave layers')
     parser.add_argument('--contrastThreshold', type=float, default=0.04, help='contrast threshold')
@@ -332,7 +365,7 @@ def parse_args(argv):
     parser.add_argument('--sigma', type=float, default=1.6, help='sigma for the gaussian blur in the sift detector')
     parser.add_argument('--nOctaves', type=int, default=4, help='number of octaves for the gaussian blur in the sift detector')
     parser.add_argument('--best_match_threshold', type=float, default=0.75, help='best match threshold for the ratio test in the sift matcher')
-    parser.add_argument('--inlier_ratio_threshold', type=float, default=0.5, help='inlier ratio threshold for the RANSAC algorithm')
+    parser.add_argument('--inlier_ratio_threshold', type=float, default=0.75, help='inlier ratio threshold for the RANSAC algorithm')
     parser.add_argument('--save_results', type=bool, default=True, help='save the results of the puzzle solving')
     args = parser.parse_args(argv)
     return args
