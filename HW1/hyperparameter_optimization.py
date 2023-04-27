@@ -5,33 +5,11 @@ from optuna.visualization import plot_optimization_history, plot_param_importanc
 import time
 import sys, os
 import argparse
-from script import solve_puzzle
+from script import solve_puzzle, Args
 
 
 PUZZLE='puzzle_affine_7'
 
-class Args:
-    def __init__(self, path="puzzle_affine_1", best_match_threshold=0.75, distance_threshold=0.8, 
-                 max_iterations=1000, inlier_ratio_threshold=0.75, min_required_matches=10,
-                 window_size=3, window_step=2):     
-        # global   
-        self.puzzle_dir = f'puzzles/{PUZZLE}'
-        self.inlier_ratio_threshold = inlier_ratio_threshold
-        self.save_results = False
-
-        # optimizable
-        self.max_iterations = max_iterations
-        self.distance_threshold = distance_threshold
-        self.best_match_threshold = best_match_threshold
-        self.min_required_matches = min_required_matches
-        self.window_size = window_size
-        self.window_step = window_step
-        # self.nfeatures = 1000
-        # self.nOctaveLayers = 3
-        # self.contrastThreshold = 0.04
-        # self.edgeThreshold = 10
-        # self.sigma = 1.6
-        # self.nOctaves = 4
 
 def sample_params(args, trial):
     args.max_iterations = trial.suggest_int('max_iterations', 100, 3000)
@@ -43,12 +21,13 @@ def sample_params(args, trial):
     # args.sigma = trial.suggest_uniform('sigma', 1.0, 2.0)
     # args.nOctaves = trial.suggest_int('nOctaves', 1, 10)
     args.best_match_threshold = trial.suggest_float('best_match_threshold', 0.5, 1.0)
-    args.min_required_matches = trial.suggest_int('min_required_matches', 4, 40)
-    args.window_size = trial.suggest_float('window_size', 1, 3)
-    args.window_step = trial.suggest_float('window_step', 1, 4)
+    args.min_required_matches = trial.suggest_int('min_required_matches', 8, 30)
+
 
 def objective(trial):
     args = Args()
+    args.save_results = False
+    args.puzzle_dir = f'puzzles/{PUZZLE}'
     sample_params(args, trial)
     pieces_solved_ratio = solve_puzzle(args.puzzle_dir, args)
     return pieces_solved_ratio

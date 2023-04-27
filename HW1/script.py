@@ -15,8 +15,7 @@ import argparse
 
 class Args:
     def __init__(self, path="puzzle_affine_1", best_match_threshold=0.75, distance_threshold=0.8, 
-                 max_iterations=1000, inlier_ratio_threshold=0.75, min_required_matches=10,
-                 window_size=3, window_step=2):     
+                 max_iterations=1000, inlier_ratio_threshold=0.9, min_required_matches=10):     
         # global   
         self.puzzle_dir = f'puzzles/{path}'
         self.inlier_ratio_threshold = inlier_ratio_threshold
@@ -27,8 +26,7 @@ class Args:
         self.distance_threshold = distance_threshold
         self.best_match_threshold = best_match_threshold
         self.min_required_matches = min_required_matches
-        self.window_size = window_size
-        self.window_step = window_step
+
         # self.nfeatures = 1000
         # self.nOctaveLayers = 3
         # self.contrastThreshold = 0.04
@@ -215,47 +213,27 @@ def find_features(piece, target, args):
     kp, des = sift.detectAndCompute(piece, None)
     #plot_keypoints(piece, kp)
 
-    # Define sliding window parameters
-    window_width = int(max(piece.shape[1], piece.shape[0]) * args.window_size)
-    window_height = window_width
-    step_size = int(window_width // args.window_step)
+    keypoints, descriptors = sift.detectAndCompute(target, None)
+    print(f"Found {len(keypoints)} keypoints in target image. Wello")
 
-    # Iterate through the target image using a sliding window
-    for y in range(0, target.shape[0] - window_height, step_size):
-        for x in range(0, target.shape[1] - window_width, step_size):
-            # Create a mask for the current region
-            mask = np.zeros(target.shape, dtype=np.uint8)
-            mask[y:y + window_height, x:x + window_width] = 1
-
-            # Detect keypoints and compute descriptors for the target image with the mask
-            target_kp, target_des = sift.detectAndCompute(target, mask)
-            if target_des is None:
-                continue
-            distances = calculate_distances_matrix_scipy(des, target_des)
-            best_matches = find_best_matches_numba(distances, threshold=args.best_match_threshold)
-
-            # Check if there are enough matches
-            if len(best_matches) >= args.min_required_matches:
-                #print(f"Found enough ({len(best_matches)}) matches in region ({x}, {y})")
-                #plot_best_matches(pieces[1], target, best_matches, kp, target_kp)
-                return kp, target_kp, best_matches
+    distances = calculate_distances_matrix_scipy(des, descriptors)
+    best_matches = find_best_matches_numba(distances, threshold=args.best_match_threshold)
     
-    return None, None, None
+    return kp, keypoints, best_matches
 
 def get_piece_transform(piece, target, warp_type, args):
     # find keypoints and descriptors
     kp, target_kp, best_matches = find_features(piece, target, args)
-    if kp is None:
-        return None, False
+    print(f"Found {len(best_matches)} matches")
 
     # implement RANSAC to find the best transformation matrix
-    best_inlier_ratio = -1
+    best_cost = float('inf')
     all_src_pts = np.float32([kp[match[0]].pt for match in best_matches]).reshape(-1, 1, 2)
     all_dst_pts = np.float32([target_kp[match[1]].pt for match in best_matches]).reshape(-1, 1, 2)
-    for _ in range(args.max_iterations):
+    for j in range(args.max_iterations):
         # select 3 or 4 random points
         k = 3 if warp_type == "affine" else 4
-        if len(best_matches) < k:
+        if len(best_matches) < args.min_required_matches:
             return None, False
         random_matches = random.sample(best_matches, k=k)
         # calculate transformation matrix
@@ -267,22 +245,24 @@ def get_piece_transform(piece, target, warp_type, args):
         else:
             M = cv.getPerspectiveTransform(src_pts, dst_pts)
             transformed_points = cv.perspectiveTransform(all_src_pts, M)
-        # calculate the residuals for all the points
-        
+
         # Calculate the distance between transformed points and their corresponding points in the target image
         residuals = np.linalg.norm(transformed_points - all_dst_pts, axis=2)
+        cost = np.sum(np.minimum(residuals ** 2, args.distance_threshold ** 2))
+    
         # if the number of inliers is larger than the current best, update the best
-        inliers = residuals < args.distance_threshold
-        inlier_ratio = np.sum(inliers) / len(residuals)
-        if inlier_ratio > best_inlier_ratio:
-            best_inlier_ratio = inlier_ratio
+        #inliers = residuals < args.distance_threshold
+        #inlier_ratio = np.sum(inliers) / len(residuals)
+        if cost < best_cost:
+            best_cost = cost
             transform = M
-            if best_inlier_ratio > 0.99:
-                break
-    # print("best_inlier_ratio: ", best_inlier_ratio)
+            #if best_cost > 0.99 and j > 100:
+            #    break
+    average_cost = best_cost / len(residuals)
+    print("best average cost: ", average_cost)
     if warp_type == "affine":
         transform = np.vstack((transform, np.array([0, 0, 1])))
-    return transform, best_inlier_ratio > args.inlier_ratio_threshold
+    return transform, average_cost < args.distance_threshold * 0.5
 
 
 
@@ -290,6 +270,7 @@ def get_piece_transform(piece, target, warp_type, args):
 
 
 def solve_puzzle(directory, args):
+    random.seed(42)
     print("Solving puzzle: ", os.path.basename(directory))
     warp_type = os.path.basename(directory).split('_')[1] # affine or homography
     pieces_dir = os.path.join(directory, 'pieces')
@@ -312,25 +293,32 @@ def solve_puzzle(directory, args):
     target_mask = cv.warpPerspective(np.ones_like(gray_pieces[0]), global_transform, (target_width, target_height), flags=cv.INTER_CUBIC)
     
     transformed_pieces = [target.copy()]
-    for i in range(1, len(pieces)):
-        # print(f"Processing piece: {i} of {len(pieces)}")
-        # find the transformation matrix for the piece
-        transform, success = get_piece_transform(gray_pieces[i], gray_target, warp_type, args)
+    unsuccessful_pieces_idxs = list(range(1, len(pieces)))
 
-        if not success:
-            #print(f"Failed to find a good transformation matrix for piece {i}")
-            continue
+    progress = True
+    while not unsuccessful_pieces_idxs == [] and progress:
+        progress = False
+        for i in unsuccessful_pieces_idxs:
+            print(f"Processing piece: {i+1} of {len(pieces)}")
+            # find the transformation matrix for the piece
+            transform, success = get_piece_transform(gray_pieces[i], gray_target, warp_type, args)
 
-        # apply the transformation matrix to the test piece
-        transformed_piece = cv.warpPerspective(pieces[i], transform, (target_width, target_height), flags=cv.INTER_CUBIC)
-        gray_transformed_piece = cv.warpPerspective(gray_pieces[i], transform, (target_width, target_height), flags=cv.INTER_CUBIC)
+            if not success:
+                print(f"Failed to find a good transformation matrix for piece {i}")
+                continue
+            progress = True
+            unsuccessful_pieces_idxs.remove(i)
 
-        #cv.imshow("Transformed Piece", transformed_piece)
-        target[gray_target == 0] = transformed_piece[gray_target == 0]
-        gray_target[gray_target == 0] = gray_transformed_piece[gray_target == 0]
-        target_mask[gray_transformed_piece != 0] += 1
+            # apply the transformation matrix to the test piece
+            transformed_piece = cv.warpPerspective(pieces[i], transform, (target_width, target_height), flags=cv.INTER_CUBIC)
+            gray_transformed_piece = cv.warpPerspective(gray_pieces[i], transform, (target_width, target_height), flags=cv.INTER_CUBIC)
 
-        transformed_pieces.append(transformed_piece)
+            #cv.imshow("Transformed Piece", transformed_piece)
+            target[gray_target == 0] = transformed_piece[gray_target == 0]
+            gray_target[gray_target == 0] = gray_transformed_piece[gray_target == 0]
+            target_mask[gray_transformed_piece != 0] += 1
+
+            transformed_pieces.append(transformed_piece)
 
     #print("Time to calculate distances: ", distances_time)
     #print("Time to find best matches: ", best_matches_time)
@@ -346,26 +334,24 @@ def solve_all_puzzles(args):
     # solve all puzzles in parallel
     with concurrent.futures.ThreadPoolExecutor() as executor:
         puzzle_dirs = [os.path.join('puzzles', puzzle_path) for puzzle_path in os.listdir(args.puzzle_dir)]
-        args = [global_parameter_dict[puzzle_path] for puzzle_path in os.listdir(args.puzzle_dir)]
-        print(os.listdir(args[0].puzzle_dir))
-        executor.map(solve_puzzle, puzzle_dirs, args)
+        #args = [global_parameter_dict[puzzle_path] for puzzle_path in os.listdir(args.puzzle_dir)]
+        #print(os.listdir(args[0].puzzle_dir))
+        executor.map(solve_puzzle, puzzle_dirs, [args] * len(puzzle_dirs))
     
 def parse_args(argv):
     parser = argparse.ArgumentParser(description='Solve a puzzle')
     parser.add_argument('--puzzle_dir', type=str, default='puzzles', help='path to the puzzle directory. If not specified, all puzzles in the puzzles directory will be solved')
-    parser.add_argument('--max_iterations', type=int, default=1000, help='maximum number of iterations for RANSAC')
+    parser.add_argument('--max_iterations', type=int, default=10000, help='maximum number of iterations for RANSAC')
     parser.add_argument('--distance_threshold', type=float, default=5.0, help='maximum distance between two features to be considered a match')
-    parser.add_argument('--min_required_matches', type=int, default=20, help='minimum number of matches required to calculate the transformation matrix')
-    parser.add_argument('--window_size', type=int, default=3, help='window size for the non-maximum suppression in the sift detector')
-    parser.add_argument('--window_step', type=int, default=2, help='window step for the non-maximum suppression in the sift detector')
-    parser.add_argument('--nfeatures', type=int, default=0, help='number of features to detect')
-    parser.add_argument('--nOctaveLayers', type=int, default=3, help='number of octave layers')
-    parser.add_argument('--contrastThreshold', type=float, default=0.04, help='contrast threshold')
-    parser.add_argument('--edgeThreshold', type=int, default=10, help='edge threshold')
-    parser.add_argument('--sigma', type=float, default=1.6, help='sigma for the gaussian blur in the sift detector')
-    parser.add_argument('--nOctaves', type=int, default=4, help='number of octaves for the gaussian blur in the sift detector')
+    parser.add_argument('--min_required_matches', type=int, default=9, help='minimum number of matches required to calculate the transformation matrix')
+    # parser.add_argument('--nfeatures', type=int, default=0, help='number of features to detect')
+    # parser.add_argument('--nOctaveLayers', type=int, default=3, help='number of octave layers')
+    # parser.add_argument('--contrastThreshold', type=float, default=0.04, help='contrast threshold')
+    # parser.add_argument('--edgeThreshold', type=int, default=10, help='edge threshold')
+    # parser.add_argument('--sigma', type=float, default=1.6, help='sigma for the gaussian blur in the sift detector')
+    # parser.add_argument('--nOctaves', type=int, default=4, help='number of octaves for the gaussian blur in the sift detector')
     parser.add_argument('--best_match_threshold', type=float, default=0.75, help='best match threshold for the ratio test in the sift matcher')
-    parser.add_argument('--inlier_ratio_threshold', type=float, default=0.75, help='inlier ratio threshold for the RANSAC algorithm')
+    parser.add_argument('--inlier_ratio_threshold', type=float, default=0.9, help='inlier ratio threshold for the RANSAC algorithm')
     parser.add_argument('--save_results', type=bool, default=True, help='save the results of the puzzle solving')
     args = parser.parse_args(argv)
     return args
