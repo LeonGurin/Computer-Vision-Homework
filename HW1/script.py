@@ -12,13 +12,27 @@ from scipy.spatial.distance import cdist
 import concurrent.futures
 import sys
 import argparse
+import csv
+
+def read_csv(file_path):
+    with open(file_path, 'r') as csvfile:
+        reader = csv.DictReader(csvfile)
+        return {row['']: row for row in reader}
+
+def write_csv(file_path, data):
+    with open(file_path, 'w') as csvfile:
+        fieldnames = ['', 'total pieces', 'solved pieces']
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        for key, row in data.items():
+            writer.writerow(row)
 
 class Args:
-    def __init__(self, path="puzzle_affine_1", best_match_threshold=0.75, distance_threshold=0.8, 
-                 max_iterations=1000, inlier_ratio_threshold=0.9, min_required_matches=10):     
+    def __init__(self, path="puzzle_affine_1", best_match_threshold=0.7, distance_threshold=5.0, 
+                 max_iterations=3000, successful_ratio=0.5, min_required_matches=9):     
         # global   
         self.puzzle_dir = f'puzzles/{path}'
-        self.inlier_ratio_threshold = inlier_ratio_threshold
+        self.successful_ratio = successful_ratio
         self.save_results = True
 
         # optimizable
@@ -262,7 +276,7 @@ def get_piece_transform(piece, target, warp_type, args):
     print("best average cost: ", average_cost)
     if warp_type == "affine":
         transform = np.vstack((transform, np.array([0, 0, 1])))
-    return transform, average_cost < args.distance_threshold * 0.5
+    return transform, average_cost < args.distance_threshold * args.success_ratio
 
 
 
@@ -271,6 +285,7 @@ def get_piece_transform(piece, target, warp_type, args):
 
 def solve_puzzle(directory, args):
     random.seed(42)
+    np.random.seed(42)
     print("Solving puzzle: ", os.path.basename(directory))
     warp_type = os.path.basename(directory).split('_')[1] # affine or homography
     pieces_dir = os.path.join(directory, 'pieces')
@@ -328,20 +343,30 @@ def solve_puzzle(directory, args):
         save_results(output_dir, pieces, target, target_mask, transformed_pieces)
 
     print(f"Done solving puzzle {os.path.basename(directory)}, with {len(transformed_pieces)} pieces out of {len(pieces)}")
-    return len(transformed_pieces) / len(pieces)
+    return len(transformed_pieces) / len(pieces), len(transformed_pieces)
 
 def solve_all_puzzles(args):
+    # Read the CSV file into a dictionary
+    csv_data = read_csv('piece_count.csv')
+
     # solve all puzzles in parallel
     with concurrent.futures.ThreadPoolExecutor() as executor:
         puzzle_dirs = [os.path.join('puzzles', puzzle_path) for puzzle_path in os.listdir(args.puzzle_dir)]
-        #args = [global_parameter_dict[puzzle_path] for puzzle_path in os.listdir(args.puzzle_dir)]
-        #print(os.listdir(args[0].puzzle_dir))
-        executor.map(solve_puzzle, puzzle_dirs, [args] * len(puzzle_dirs))
+
+        # Update the dictionary with the results of the solve_puzzle function
+        results = executor.map(solve_puzzle, puzzle_dirs, [args] * len(puzzle_dirs))
+        print(results)
+        for puzzle_path, (_, solved_pieces) in zip(puzzle_dirs, results):
+            puzzle_name = os.path.basename(puzzle_path)
+            csv_data[puzzle_name]['solved pieces'] = str(solved_pieces)
+
+    # Write the updated dictionary back to the CSV file
+    write_csv('piece_count.csv', csv_data)
     
 def parse_args(argv):
     parser = argparse.ArgumentParser(description='Solve a puzzle')
     parser.add_argument('--puzzle_dir', type=str, default='puzzles', help='path to the puzzle directory. If not specified, all puzzles in the puzzles directory will be solved')
-    parser.add_argument('--max_iterations', type=int, default=10000, help='maximum number of iterations for RANSAC')
+    parser.add_argument('--max_iterations', type=int, default=3000, help='maximum number of iterations for RANSAC')
     parser.add_argument('--distance_threshold', type=float, default=5.0, help='maximum distance between two features to be considered a match')
     parser.add_argument('--min_required_matches', type=int, default=9, help='minimum number of matches required to calculate the transformation matrix')
     # parser.add_argument('--nfeatures', type=int, default=0, help='number of features to detect')
@@ -350,8 +375,8 @@ def parse_args(argv):
     # parser.add_argument('--edgeThreshold', type=int, default=10, help='edge threshold')
     # parser.add_argument('--sigma', type=float, default=1.6, help='sigma for the gaussian blur in the sift detector')
     # parser.add_argument('--nOctaves', type=int, default=4, help='number of octaves for the gaussian blur in the sift detector')
-    parser.add_argument('--best_match_threshold', type=float, default=0.75, help='best match threshold for the ratio test in the sift matcher')
-    parser.add_argument('--inlier_ratio_threshold', type=float, default=0.9, help='inlier ratio threshold for the RANSAC algorithm')
+    parser.add_argument('--best_match_threshold', type=float, default=0.7, help='best match threshold for the ratio test in the sift matcher')
+    parser.add_argument('--success_ratio', type=float, default=0.5, help='minimum ratio of cost that must be achieved to successfully match a piece')
     parser.add_argument('--save_results', type=bool, default=True, help='save the results of the puzzle solving')
     args = parser.parse_args(argv)
     return args

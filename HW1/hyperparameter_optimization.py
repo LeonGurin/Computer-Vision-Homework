@@ -29,7 +29,7 @@ def objective(trial):
     args.save_results = False
     args.puzzle_dir = f'puzzles/{PUZZLE}'
     sample_params(args, trial)
-    pieces_solved_ratio = solve_puzzle(args.puzzle_dir, args)
+    pieces_solved_ratio, _ = solve_puzzle(args.puzzle_dir, args)
     return pieces_solved_ratio
 
 def run_study():
