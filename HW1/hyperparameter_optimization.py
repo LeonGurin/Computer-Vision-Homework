@@ -12,7 +12,7 @@ PUZZLE='puzzle_affine_7'
 
 
 def sample_params(args, trial):
-    args.max_iterations = trial.suggest_int('max_iterations', 100, 3000)
+    args.max_iterations = trial.suggest_int('max_iterations', 100, 4000)
     args.distance_threshold = trial.suggest_float('distance_threshold', 0.5, 10.0)
     # args.nfeatures = trial.suggest_int('nfeatures', 100, 1000)
     # args.nOctaveLayers = trial.suggest_int('nOctaveLayers', 1, 10)
