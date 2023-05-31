@@ -1,35 +1,63 @@
+import os
 import cv2 as cv
 import numpy as np
 import matplotlib.pyplot as plt
+from pathlib import Path
+import argparse
 
-DIR = 'set_1'
-
-with open(DIR + '/max_disp.txt', 'r') as f:
-    MAX_DISP = int(f.read())
-    f.close()
-
-with open(DIR + '/K.txt', 'r') as f:
-    K = np.array([[float(num) for num in line.split()] for line in f])
-    f.close()
-
-WINDOW_SIZE_X = 5
-WINDOW_SIZE_Y = 5
+WINDOW_SIZE = 5
 BASELINE = 0.1
-FOCAL_LENGTH = K[0, 0]
+
+MAX_DISP = None
+K = None
+FOCAL_LENGTH = None
+
+def read_additional_data(dir):
+    global MAX_DISP, K, FOCAL_LENGTH
+    with open(dir / 'max_disp.txt', 'r') as f:
+        MAX_DISP = int(f.read())
+
+    with open(dir / 'K.txt', 'r') as f:
+        K = np.array([[float(num) for num in line.split()] for line in f])
+
+    FOCAL_LENGTH = K[0, 0]
+
+def load_images(dir):
+    left = cv.imread(str(dir / 'im_left.jpg'), cv.IMREAD_GRAYSCALE)
+    right = cv.imread(str(dir / 'im_right.jpg'), cv.IMREAD_GRAYSCALE)
+    return left, right
+
+def census_transform2(img):
+    h, w = img.shape
+    pad = WINDOW_SIZE // 2
+    img_padded = np.pad(img, pad, 'constant', constant_values=0)
+    
+    shifts = [(i, j) for i in range(-pad, pad + 1) for j in range(-pad, pad + 1) if (i, j) != (0, 0)]
+    census = np.zeros((h, w), dtype=np.uint64)
+
+    for i, j in shifts:
+        binary = (img_padded[pad + i:h + pad + i, pad + j:w + pad + j] > img).astype(np.uint64)
+        census = (census << 1) | binary
+
+    return census
+
+# def census_transform_cv(img):
+#     h, w = img.shape
+#     census = cv.stereo.censusTransform(img)
+#     return census
 
 def census_transform(img):
     h, w = img.shape
-    img = np.pad(img, ((WINDOW_SIZE_Y//2, WINDOW_SIZE_Y//2), (WINDOW_SIZE_X//2, WINDOW_SIZE_X//2)), 'constant', constant_values=0)
+    half_window_size = WINDOW_SIZE // 2
+    img = np.pad(img, half_window_size, 'constant', constant_values=0)
     census = np.zeros((h, w), dtype=np.uint64)
 
-    start_x = WINDOW_SIZE_X // 2
-    start_y = WINDOW_SIZE_Y // 2
 
-    for i in range(start_x, h - start_x):
-        for j in range(start_y, w - start_y):
+    for i in range(half_window_size, h - half_window_size):
+        for j in range(half_window_size, w - half_window_size):
             binary = ''
-            for k in range(i - start_x, i + start_x + 1):
-                for l in range(j - start_y, j + start_y + 1):
+            for k in range(i - half_window_size, i + half_window_size + 1):
+                for l in range(j - half_window_size, j + half_window_size + 1):
                     if img[k, l] > img[i, j]:
                         binary += '1'
                     else:
@@ -133,13 +161,34 @@ def create_depth_map(disparity):
     
     return depth_map
 
+def arg_parser():
+    parser = argparse.ArgumentParser(description="HW2 of Computer Vision 2023")
+    parser.add_argument("-p", "--path", type=str, default=None, help="Path to the direcroty of a specific set. Default is all sets.")
+    parser.add_argument("-d", "--debug", action="store_true", default=False, help="Plot extra useful images.")
+    return parser.parse_args()
+
 def main():
-    left  = cv.imread(DIR + '/im_left.jpg', cv.IMREAD_GRAYSCALE)
-    right = cv.imread(DIR + '/im_right.jpg', cv.IMREAD_GRAYSCALE)
+    args = arg_parser()
+    if args.path is None:
+        # to be supported
+        exit(1)
+
+    set = os.path.basename(args.path)
+    dir = Path(args.path)
+    print(f"Solving for set: {str(set)}")
+
+    left, right = load_images(dir)
+    read_additional_data(dir)
 
     # calculate census transform
     left_census = census_transform(left)
     right_census = census_transform(right)
+
+    if args.debug:
+        print("finished census transform")
+        os.makedirs(f'debug/{set}', exist_ok=True)
+        cv.imwrite(f'debug/{set}/left_census.jpg', left_census)
+        cv.imwrite(f'debug/{set}/right_census.jpg', right_census)
     
     # calculate cost volumes
     leftToRight_cost_vol, rightToLeft_cost_vol = cost_volume(left_census, right_census)
@@ -158,24 +207,27 @@ def main():
     # filter with consistency test
     # leftToRight_disparity, rightToLeft_disparity = consistency_test(leftToRight_disparity, rightToLeft_disparity)
     
+    print("finished calculating disparity map")
+
     # create depth map
     depth_left = create_depth_map(leftToRight_disparity)
     depth_right = create_depth_map(rightToLeft_disparity)
 
-    cv.imwrite('disp_left.png', leftToRight_disparity)
-    cv.imwrite('disp_right.png', rightToLeft_disparity)
-    cv.imwrite('depth_left.png', depth_left)
-    cv.imwrite('depth_right.png', depth_right)
+    print("finished calculating depth map")
 
-    np.savetxt('disp_left.txt', leftToRight_disparity, delimiter=',')
-    np.savetxt('disp_right.txt', rightToLeft_disparity, delimiter=',')
-    np.savetxt('depth_left.txt', depth_left, delimiter=',')
-    np.savetxt('depth_right.txt', depth_right, delimiter=',')
+    # save images
+    os.makedirs(f'results/{set}', exist_ok=True)
+    cv.imwrite(f'results/{set}/disp_left.jpg', leftToRight_disparity)
+    cv.imwrite(f'results/{set}/disp_right.jpg', rightToLeft_disparity)
+    cv.imwrite(f'results/{set}/depth_left.jpg', depth_left)
+    cv.imwrite(f'results/{set}/depth_right.jpg', depth_right)
 
-def main2():
+    np.savetxt(f'results/{set}/disp_left.txt', leftToRight_disparity, delimiter=',')
+    np.savetxt(f'results/{set}/disp_right.txt', rightToLeft_disparity, delimiter=',')
+    np.savetxt(f'results/{set}/depth_left.txt', depth_left, delimiter=',')
+    np.savetxt(f'results/{set}/depth_right.txt', depth_right, delimiter=',')
+
     # calculate reprojection using depth map D and intrinsics matrix K
-    # depth_left = np.loadtxt(DIR + '/depth_left.txt', delimiter=',')
-    depth_left = np.loadtxt('depth_left.txt', delimiter=',')
     
     R = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
     t = np.array([[0.0], [0.0], [0.0]])
@@ -184,6 +236,8 @@ def main2():
     reprojection_left = np.zeros((h, w, 3), dtype=np.float32)
 
     reprojection_points_left = np.zeros((h, w, 3), dtype=np.float32)
+
+    left = cv.imread(str(dir / 'im_left.jpg'), cv.IMREAD_COLOR)
 
     for y in range(h):
         for x in range(w):
@@ -203,8 +257,6 @@ def main2():
     # translate each time 1 cm along the x-axis
     # also get the RGB values from the original image and assign them to the new image
 
-    left = cv.imread(DIR + '/im_left.jpg', cv.IMREAD_COLOR)
-
     for i in range(12):
         t[0, 0] = i * 0.01
         for y in range(h):
@@ -223,8 +275,7 @@ def main2():
                 if x_new >= 0 and x_new < w and y_new >= 0 and y_new < h:
                     reprojection_left[y_new, x_new, :] = left[y, x, :]
 
-        cv.imwrite('synth_' + str(i) + '.png', reprojection_left)
+        cv.imwrite(f'results/{set}/synth_' + str(i) + '.png', reprojection_left)
     
 if __name__ == "__main__":
     main()
-    main2()
