@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 import argparse
 
-WINDOW_SIZE = 5
+WINDOW_SIZE = 10
 BASELINE = 0.1
 
 MAX_DISP = None
@@ -66,6 +66,24 @@ def census_transform(img):
 
     return census
 
+def unpackbits(x, num_bits):
+    if np.issubdtype(x.dtype, np.floating):
+        raise ValueError("numpy data type needs to be int-like")
+    xshape = list(x.shape)
+    x = x.reshape([-1, 1])
+    mask = 2**np.arange(num_bits, dtype=x.dtype).reshape([1, num_bits])
+    return (x & mask).astype(bool).astype(int).reshape(xshape + [num_bits])
+
+def hamming_distance2(census, shifted_census):
+    distance = np.bitwise_xor(census, shifted_census).astype(np.uint64)
+    distance = np.sum(unpackbits(distance, num_bits=64), axis=-1)
+    return distance
+
+# def hamming_distance2(census, shifted_census):
+#     distance = np.bitwise_xor(census, shifted_census).astype(np.uint8)
+#     distance = np.sum(np.unpackbits(distance, axis=-1), axis=-1)
+#     return distance
+
 def hamming_distance(left, right):
     h, w = right.shape
     hamming = np.zeros((h, w), dtype=np.uint16)
@@ -76,37 +94,41 @@ def hamming_distance(left, right):
 
 def cost_volume(left_census, right_census):
     h, w = left_census.shape
-    cost_volume1 = np.zeros((h, w, MAX_DISP), dtype=np.uint64)
-    cost_volume2 = np.zeros((h, w, MAX_DISP), dtype=np.uint64)
+    rtl_cost_volume = np.zeros((h, w, MAX_DISP), dtype=np.uint64)
+    ltr_cost_volume = np.zeros((h, w, MAX_DISP), dtype=np.uint64)
 
-    # right_shifted = right_census.copy()
-    # left_shifted = left_census.copy()
+    # for d in range(MAX_DISP):
+    #     for i in range(h):
+    #         for j in range(w):
+    #             if j - d >= 0:
+    #                 ltr_cost_volume[i, j, d] = bin(left_census[i, j] ^ right_census[i, j - d]).count('1')
+    #             else:
+    #                 ltr_cost_volume[i, j, d] = bin(left_census[i, j] ^ right_census[i, 0]).count('1')
+    #             if j + d < w:
+    #                 rtl_cost_volume[i, j, d] = bin(right_census[i, j] ^ left_census[i, j + d]).count('1')
+    #             else:
+    #                 rtl_cost_volume[i, j, d] = bin(right_census[i, j] ^ left_census[i, w - 1]).count('1')
 
     for d in range(MAX_DISP):
-        for i in range(h):
-            for j in range(w):
-                if j - d >= 0:
-                    cost_volume1[i, j, d] = bin(left_census[i, j] ^ right_census[i, j - d]).count('1')
-                else:
-                    cost_volume1[i, j, d] = bin(left_census[i, j] ^ right_census[i, 0]).count('1')
-                if j + d < w:
-                    cost_volume2[i, j, d] = bin(right_census[i, j] ^ left_census[i, j + d]).count('1')
-                else:
-                    cost_volume2[i, j, d] = bin(right_census[i, j] ^ left_census[i, w - 1]).count('1')
+        right_shifted = np.zeros((h, w), dtype=np.uint64)
+        left_shifted = np.zeros((h, w), dtype=np.uint64)
+        if d == 0:
+            right_shifted = right_census
+            left_shifted = left_census
+        else:
+            right_shifted[:, d:] = right_census[:, :-d]
+            left_shifted[:, :-d] = left_census[:, d:]
 
-    # for i in range(MAX_DISP):
-    #     right_shifted = np.roll(right_shifted, 1, axis=1)
-    #     left_shifted = np.roll(left_shifted, -1, axis=1)
-    #     cost_volume1[:, :, i] = hamming_distance(left_census, right_shifted)
-    #     cost_volume2[:, :, i] = hamming_distance(right_census, left_shifted)
+        ltr_cost_volume[:, :, d] = hamming_distance2(left_census, right_shifted)
+        rtl_cost_volume[:, :, d] = hamming_distance2(right_census, left_shifted)
 
-    return cost_volume1, cost_volume2
+    return ltr_cost_volume, rtl_cost_volume
 
-def aggregate_cost_volume(cost_volume1, cost_volume2, mask_size = (3, 3)):
+def aggregate_cost_volume(cost_volume1, cost_volume2, mask_size = (3, 3), sigma = 1):
     # perform uniform averaging with openCV filter
     for i in range(MAX_DISP):
-        cost_volume1[:, :, i] = cv.blur(cost_volume1[:, :, i], mask_size)
-        cost_volume2[:, :, i] = cv.blur(cost_volume2[:, :, i], mask_size)
+        cost_volume1[:, :, i] = cv.GaussianBlur(cost_volume1[:, :, i], mask_size, sigma)
+        cost_volume2[:, :, i] = cv.GaussianBlur(cost_volume2[:, :, i], mask_size, sigma)
     
     return cost_volume1, cost_volume2
 
@@ -129,25 +151,45 @@ def find_minimum_cost(aggregated_cost_volume):
 
     return disparity
 
-def consistency_test(left_disparity, right_disparity):
+def consistency_test(left_disparity, right_disparity, threshold = 10):
     h, w = left_disparity.shape
-    threshold = 60
+    original_left = left_disparity.copy()
+    original_right = right_disparity.copy()
+    left_consistency_mask = np.zeros((h, w), dtype=np.uint8)
+    right_consistency_mask = np.zeros((h, w), dtype=np.uint8)
+
     
     for i in range(h):
         for j in range(w):
-            mapped_val = j - left_disparity[i, j]
+            mapped_val = j - original_left[i, j]
             if mapped_val >= 0 and mapped_val < w:
-                if abs(left_disparity[i, j] - right_disparity[i, mapped_val]) > threshold:
+                if abs(original_left[i, j] - original_right[i, mapped_val]) > threshold:
                     left_disparity[i, j] = 0
                     right_disparity[i, mapped_val] = 0
             
-            mapped_val = j - right_disparity[i, j]
+            mapped_val = j + original_right[i, j]
             if mapped_val >= 0 and mapped_val < w:
-                if abs(right_disparity[i, j] - left_disparity[i, mapped_val]) > threshold:
+                if abs(original_right[i, j] - original_left[i, mapped_val]) > threshold:
                     right_disparity[i, j] = 0
                     left_disparity[i, mapped_val] = 0
     
     return left_disparity, right_disparity
+
+def consistency_test2(left_disparity, right_disparity, direction, threshold = 1):
+    h, w = left_disparity.shape
+    lr_check = np.zeros((h, w), dtype=np.float32)
+    x, y = np.meshgrid(range(w),range(h))
+    if direction == 'left':
+        r_x = (x - left_disparity) # x-DL(x,y)
+        mask1 = (r_x >= 0) # coordinate should be non-negative integer
+    elif direction == 'right':
+        r_x = (x + left_disparity)
+        mask1 = (r_x < w) # coordinate should be less than image width
+    l_disp = left_disparity[mask1]
+    r_disp = right_disparity[y[mask1], r_x[mask1]]
+    mask2 = (l_disp == r_disp) # check if DL(x,y) = DR(x-DL(x,y)) or DR(x,y) = DL(x+DR(x,y),y)
+    lr_check[y[mask1][mask2], x[mask1][mask2]] = left_disparity[mask1][mask2]
+    return lr_check
 
 def create_depth_map(disparity):
     h, w = disparity.shape
@@ -159,6 +201,11 @@ def create_depth_map(disparity):
             else:
                 depth_map[i, j] = 0.0
     
+    return depth_map
+
+def create_depth_map2(disparity):
+    non_zero_disparity = np.where(disparity != 0, disparity, 1)
+    depth_map = (BASELINE * FOCAL_LENGTH) / non_zero_disparity
     return depth_map
 
 def arg_parser():
@@ -181,8 +228,8 @@ def main():
     read_additional_data(dir)
 
     # calculate census transform
-    left_census = census_transform(left)
-    right_census = census_transform(right)
+    left_census = census_transform2(left)
+    right_census = census_transform2(right)
 
     if args.debug:
         print("finished census transform")
@@ -192,6 +239,15 @@ def main():
     
     # calculate cost volumes
     leftToRight_cost_vol, rightToLeft_cost_vol = cost_volume(left_census, right_census)
+
+    if args.debug:
+        print("finished cost volume")
+        # normalize cost volume for visualization
+        leftToRight_cost_vol = cv.normalize(leftToRight_cost_vol, None, alpha=0, beta=255, norm_type=cv.NORM_MINMAX, dtype=cv.CV_8U)
+        rightToLeft_cost_vol = cv.normalize(rightToLeft_cost_vol, None, alpha=0, beta=255, norm_type=cv.NORM_MINMAX, dtype=cv.CV_8U)
+        # save cost volume
+        cv.imwrite(f'debug/{set}/leftToRight_cost_vol_{100}.jpg', leftToRight_cost_vol[:, :, 100])
+        cv.imwrite(f'debug/{set}/rightToLeft_cost_vol_{100}.jpg', rightToLeft_cost_vol[:, :, 100])
 
     # aggregate cost volume
     leftToRight_aggregated_cost_vol, rightToLeft_aggregated_cost_vol = aggregate_cost_volume(leftToRight_cost_vol, rightToLeft_cost_vol)
@@ -204,16 +260,27 @@ def main():
     # leftToRight_disparity = find_minimum_cost(leftToRight_cost_vol)
     # rightToLeft_disparity = find_minimum_cost(rightToLeft_cost_vol)
 
-    # filter with consistency test
-    # leftToRight_disparity, rightToLeft_disparity = consistency_test(leftToRight_disparity, rightToLeft_disparity)
-    
     print("finished calculating disparity map")
 
+    # filter with consistency test
+    #leftToRight_disparity, rightToLeft_disparity = consistency_test(leftToRight_disparity, rightToLeft_disparity)
+    leftToRight_disparity = consistency_test2(leftToRight_disparity, rightToLeft_disparity, direction='left')
+    rightToLeft_disparity = consistency_test2(rightToLeft_disparity, leftToRight_disparity, direction='right')
+    print("finished consistency test")
+    
+
     # create depth map
-    depth_left = create_depth_map(leftToRight_disparity)
-    depth_right = create_depth_map(rightToLeft_disparity)
+    depth_left = create_depth_map2(leftToRight_disparity)
+    depth_right = create_depth_map2(rightToLeft_disparity)
 
     print("finished calculating depth map")
+
+    # normalize disparity map for visualization
+    leftToRight_disparity = cv.normalize(leftToRight_disparity, None, alpha=0, beta=255, norm_type=cv.NORM_MINMAX, dtype=cv.CV_8U)
+    rightToLeft_disparity = cv.normalize(rightToLeft_disparity, None, alpha=0, beta=255, norm_type=cv.NORM_MINMAX, dtype=cv.CV_8U)
+    # normalize depth map for visualization
+    depth_left = cv.normalize(depth_left, None, alpha=0, beta=255, norm_type=cv.NORM_MINMAX, dtype=cv.CV_8U)
+    depth_right = cv.normalize(depth_right, None, alpha=0, beta=255, norm_type=cv.NORM_MINMAX, dtype=cv.CV_8U)
 
     # save images
     os.makedirs(f'results/{set}', exist_ok=True)
