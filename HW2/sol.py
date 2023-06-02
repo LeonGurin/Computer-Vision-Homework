@@ -4,13 +4,21 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 import argparse
+import timeit as time
 
-WINDOW_SIZE = 10
+WINDOW_SIZE = 9
 BASELINE = 0.1
 
 MAX_DISP = None
 K = None
 FOCAL_LENGTH = None
+
+R = np.array([[1.0, 0.0, 0.0], 
+              [0.0, 1.0, 0.0], 
+              [0.0, 0.0, 1.0]])
+t = np.array([[0.0], 
+              [0.0], 
+              [0.0]])
 
 def read_additional_data(dir):
     global MAX_DISP, K, FOCAL_LENGTH
@@ -51,7 +59,6 @@ def census_transform(img):
     half_window_size = WINDOW_SIZE // 2
     img = np.pad(img, half_window_size, 'constant', constant_values=0)
     census = np.zeros((h, w), dtype=np.uint64)
-
 
     for i in range(half_window_size, h - half_window_size):
         for j in range(half_window_size, w - half_window_size):
@@ -97,18 +104,6 @@ def cost_volume(left_census, right_census):
     rtl_cost_volume = np.zeros((h, w, MAX_DISP), dtype=np.uint64)
     ltr_cost_volume = np.zeros((h, w, MAX_DISP), dtype=np.uint64)
 
-    # for d in range(MAX_DISP):
-    #     for i in range(h):
-    #         for j in range(w):
-    #             if j - d >= 0:
-    #                 ltr_cost_volume[i, j, d] = bin(left_census[i, j] ^ right_census[i, j - d]).count('1')
-    #             else:
-    #                 ltr_cost_volume[i, j, d] = bin(left_census[i, j] ^ right_census[i, 0]).count('1')
-    #             if j + d < w:
-    #                 rtl_cost_volume[i, j, d] = bin(right_census[i, j] ^ left_census[i, j + d]).count('1')
-    #             else:
-    #                 rtl_cost_volume[i, j, d] = bin(right_census[i, j] ^ left_census[i, w - 1]).count('1')
-
     for d in range(MAX_DISP):
         right_shifted = np.zeros((h, w), dtype=np.uint64)
         left_shifted = np.zeros((h, w), dtype=np.uint64)
@@ -125,7 +120,6 @@ def cost_volume(left_census, right_census):
     return ltr_cost_volume, rtl_cost_volume
 
 def aggregate_cost_volume(cost_volume1, cost_volume2, mask_size = (3, 3), sigma = 1):
-    # perform uniform averaging with openCV filter
     for i in range(MAX_DISP):
         cost_volume1[:, :, i] = cv.GaussianBlur(cost_volume1[:, :, i], mask_size, sigma)
         cost_volume2[:, :, i] = cv.GaussianBlur(cost_volume2[:, :, i], mask_size, sigma)
@@ -158,7 +152,6 @@ def consistency_test(left_disparity, right_disparity, threshold = 10):
     left_consistency_mask = np.zeros((h, w), dtype=np.uint8)
     right_consistency_mask = np.zeros((h, w), dtype=np.uint8)
 
-    
     for i in range(h):
         for j in range(w):
             mapped_val = j - original_left[i, j]
@@ -175,7 +168,7 @@ def consistency_test(left_disparity, right_disparity, threshold = 10):
     
     return left_disparity, right_disparity
 
-def consistency_test2(left_disparity, right_disparity, direction, threshold = 1):
+def consistency_test2(left_disparity, right_disparity, direction):
     h, w = left_disparity.shape
     lr_check = np.zeros((h, w), dtype=np.float32)
     x, y = np.meshgrid(range(w),range(h))
@@ -206,8 +199,37 @@ def create_depth_map(disparity):
 def create_depth_map2(disparity):
     non_zero_disparity = np.where(disparity != 0, disparity, 1)
     depth_map = (BASELINE * FOCAL_LENGTH) / non_zero_disparity
+    # depth_map[disparity == 0] = 0.0
     return depth_map
 
+def synthesize_image(i, left, pixel_3d_points, set):
+    h, w, _ = left.shape
+    t[0, 0] = -i * 0.01
+    extrinsic_matrix_shifted = np.hstack((R, t))
+    P = np.dot(K, extrinsic_matrix_shifted)
+    # print(extrinsic_matrix_shifted)
+    
+    synth_img = np.zeros_like(left)
+
+    for v in range(h):
+        for u in range(w):
+            pixel_3d_cam_shifted = pixel_3d_points[v, u, :]
+            # Project 3D point onto the camera
+            pixel_3d_cam_shifted_homogeneous = np.hstack((pixel_3d_cam_shifted, 1))
+            pixel_2d_cam_shifted = np.dot(P, pixel_3d_cam_shifted_homogeneous.T)
+            
+            if pixel_2d_cam_shifted[2] != 0:
+                pixel_2d_cam_shifted = pixel_2d_cam_shifted / pixel_2d_cam_shifted[2]
+                point_2d = np.round(pixel_2d_cam_shifted[:2]).astype(int)
+
+                if 0 <= point_2d[1] < h and 0 <= point_2d[0] < w:
+                    # synth_img[v, u, :] = left[point_2d[1], point_2d[0], :]
+                    synth_img[point_2d[1], point_2d[0], :] = left[v, u, :]
+                
+    # Save the resulting image with the corresponding shift index
+    cv.imwrite(f"results/{set}/synth_{str(i).zfill(2)}.jpg", synth_img)
+    print("Finished synthesizing synth_{}.jpg".format(i))
+    
 def arg_parser():
     parser = argparse.ArgumentParser(description="HW2 of Computer Vision 2023")
     parser.add_argument("-p", "--path", type=str, default=None, help="Path to the direcroty of a specific set. Default is all sets.")
@@ -246,8 +268,8 @@ def main():
         leftToRight_cost_vol = cv.normalize(leftToRight_cost_vol, None, alpha=0, beta=255, norm_type=cv.NORM_MINMAX, dtype=cv.CV_8U)
         rightToLeft_cost_vol = cv.normalize(rightToLeft_cost_vol, None, alpha=0, beta=255, norm_type=cv.NORM_MINMAX, dtype=cv.CV_8U)
         # save cost volume
-        cv.imwrite(f'debug/{set}/leftToRight_cost_vol_{100}.jpg', leftToRight_cost_vol[:, :, 100])
-        cv.imwrite(f'debug/{set}/rightToLeft_cost_vol_{100}.jpg', rightToLeft_cost_vol[:, :, 100])
+        cv.imwrite(f'debug/{set}/leftToRight_cost_vol_{MAX_DISP-1}.jpg', leftToRight_cost_vol[:, :, MAX_DISP-1])
+        cv.imwrite(f'debug/{set}/rightToLeft_cost_vol_{MAX_DISP-1}.jpg', rightToLeft_cost_vol[:, :, MAX_DISP-1])
 
     # aggregate cost volume
     leftToRight_aggregated_cost_vol, rightToLeft_aggregated_cost_vol = aggregate_cost_volume(leftToRight_cost_vol, rightToLeft_cost_vol)
@@ -257,8 +279,6 @@ def main():
     rightToLeft_disparity = np.argmin(rightToLeft_aggregated_cost_vol, axis=2)
     # leftToRight_disparity = find_minimum_cost(leftToRight_aggregated_cost_vol)
     # rightToLeft_disparity = find_minimum_cost(rightToLeft_aggregated_cost_vol)
-    # leftToRight_disparity = find_minimum_cost(leftToRight_cost_vol)
-    # rightToLeft_disparity = find_minimum_cost(rightToLeft_cost_vol)
 
     print("finished calculating disparity map")
 
@@ -268,12 +288,32 @@ def main():
     rightToLeft_disparity = consistency_test2(rightToLeft_disparity, leftToRight_disparity, direction='right')
     print("finished consistency test")
     
-
     # create depth map
-    depth_left = create_depth_map2(leftToRight_disparity)
-    depth_right = create_depth_map2(rightToLeft_disparity)
+    depth_left = create_depth_map(leftToRight_disparity)
+    depth_right = create_depth_map(rightToLeft_disparity)
 
     print("finished calculating depth map")
+
+    np.savetxt(f'results/{set}/disp_left.txt', leftToRight_disparity, delimiter=',', fmt='%d', newline='\n')
+    np.savetxt(f'results/{set}/disp_right.txt', rightToLeft_disparity, delimiter=',', fmt='%d', newline='\n')
+    with open(f'results/{set}/depth_left.txt', 'w') as f:
+        for i in range(depth_left.shape[0]):
+            for j in range(depth_left.shape[1]):
+                if j == depth_left.shape[1] - 1:
+                    f.write(str(depth_left[i, j]))
+                else:
+                    f.write(str(depth_left[i, j]) + ',')
+            f.write('\n')
+        f.close()
+    with open(f'results/{set}/depth_right.txt', 'w') as f:
+        for i in range(depth_right.shape[0]):
+            for j in range(depth_right.shape[1]):
+                if j == depth_right.shape[1] - 1:
+                    f.write(str(depth_right[i, j]))
+                else:
+                    f.write(str(depth_right[i, j]) + ',')
+            f.write('\n')
+        f.close()
 
     # normalize disparity map for visualization
     leftToRight_disparity = cv.normalize(leftToRight_disparity, None, alpha=0, beta=255, norm_type=cv.NORM_MINMAX, dtype=cv.CV_8U)
@@ -289,60 +329,79 @@ def main():
     cv.imwrite(f'results/{set}/depth_left.jpg', depth_left)
     cv.imwrite(f'results/{set}/depth_right.jpg', depth_right)
 
-    np.savetxt(f'results/{set}/disp_left.txt', leftToRight_disparity, delimiter=',')
-    np.savetxt(f'results/{set}/disp_right.txt', rightToLeft_disparity, delimiter=',')
-    np.savetxt(f'results/{set}/depth_left.txt', depth_left, delimiter=',')
-    np.savetxt(f'results/{set}/depth_right.txt', depth_right, delimiter=',')
+    # np.savetxt(f'results/{set}/depth_left.txt', depth_left, delimiter=',', fmt='%f', newline='\n')
+    # np.savetxt(f'results/{set}/depth_right.txt', depth_right, delimiter=',', fmt='%f', newline='\n')
 
     # calculate reprojection using depth map D and intrinsics matrix K
-    
-    R = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
-    t = np.array([[0.0], [0.0], [0.0]])
+    left_colored = cv.imread(f'{set}/im_left.jpg', cv.IMREAD_COLOR)
+    h, w = left_colored.shape[:2]
 
-    h, w = depth_left.shape
-    reprojection_left = np.zeros((h, w, 3), dtype=np.float32)
+    pixel_3d_points = np.zeros((h, w, 3), dtype=np.float32)
 
-    reprojection_points_left = np.zeros((h, w, 3), dtype=np.float32)
+    # Synthesize 3D points onto the camera with the shifted extrinsic matrix
+    for v in range(h):
+        for u in range(w):
+            depth = depth_left[v, u]
 
-    left = cv.imread(str(dir / 'im_left.jpg'), cv.IMREAD_COLOR)
+            pixel_homogeneous = np.array([[u, v, 1]])
+            pixel_3d_cam_shifted = np.dot(np.linalg.inv(K), pixel_homogeneous.T) * depth
 
-    for y in range(h):
-        for x in range(w):
-            depth_value_left = depth_left[y, x]
+            pixel_3d_points[v, u, :] = pixel_3d_cam_shifted.T
 
-            # Convert pixel coordinates to homogeneous coordinates
-            homogeneous_point = np.array([x, y, 1])
+    for i in range(0,12):
+        synthesize_image(i, left_colored, pixel_3d_points, set)
 
-            # calculate the 3d point in camera coordinates
-            point_left = depth_value_left * np.matmul(np.linalg.inv(K), homogeneous_point)
+# _________________________________________________________________
 
-            # append the 3d point to the list of points
-            reprojection_points_left[y, x, :] = point_left
+    # h, w = depth_left.shape
+    # reprojection_left = np.zeros((h, w, 3), dtype=np.float32)
 
-    # synthesize new images by projecting the 3d points back to the image plane 
-    # using the camera matrix K and the rotation matrix R
-    # translate each time 1 cm along the x-axis
-    # also get the RGB values from the original image and assign them to the new image
+    # left = cv.imread(str(dir / 'im_left.jpg'), cv.IMREAD_COLOR)
 
-    for i in range(12):
-        t[0, 0] = i * 0.01
-        for y in range(h):
-            for x in range(w):
-                point_left = reprojection_points_left[y, x, :]
-                point_left = point_left.reshape((3, 1))
-                point_left = np.matmul(R, point_left) + t
-                point_left = np.matmul(K, point_left)
-                point_left = point_left / point_left[2, 0]
-                try:
-                    x_new = int(point_left[0, 0])
-                    y_new = int(point_left[1, 0])
-                except:
-                    x_new = 0
-                    y_new = 0
-                if x_new >= 0 and x_new < w and y_new >= 0 and y_new < h:
-                    reprojection_left[y_new, x_new, :] = left[y, x, :]
+    # reprojection_points_left = np.zeros((h, w, 3), dtype=np.float32)
+    # for y in range(h):
+    #     for x in range(w):
+    #         depth_value_left = depth_left[y, x]
 
-        cv.imwrite(f'results/{set}/synth_' + str(i) + '.png', reprojection_left)
+    #         # Convert pixel coordinates to homogeneous coordinates
+    #         homogeneous_point = np.array([x, y, 1])
+
+    #         # calculate the 3d point in camera coordinates
+    #         point_left = depth_value_left * np.matmul(np.linalg.inv(K), homogeneous_point)
+
+    #         # append the 3d point to the list of points
+    #         reprojection_points_left[y, x, :] = point_left
+
+    # # synthesize new images by projecting the 3d points back to the image plane 
+    # # using the camera matrix K and the rotation matrix R
+    # # translate each time 1 cm along the x-axis
+    # # also get the RGB values from the original image and assign them to the new image
+
+    # for i in range(12):
+    #     t[0, 0] = i * 0.01
+    #     P = np.matmul(K, np.hstack((R, t)))
+    #     for y in range(h):
+    #         for x in range(w):
+    #             point_left = reprojection_points_left[y, x, :]
+    #             # point_left = np.hstack((point_left, 1))
+    #             # point_left = point_left.reshape((4, 1))
+    #             point_left = point_left.reshape((3, 1))
+    #             point_left = np.matmul(R, point_left) + t
+    #             point_left = np.matmul(K, point_left)
+    #             # point_left = np.matmul(P, point_left)
+    #             if point_left[2, 0] != 0:
+    #                 point_left = point_left / point_left[2, 0]
+    #                 x_new = int(point_left[0, 0])
+    #                 y_new = int(point_left[1, 0])
+    #                 if x_new >= 0 and x_new < w and y_new >= 0 and y_new < h:
+    #                     reprojection_left[y_new, x_new, :] = left[y, x, :]
+    #                     # reprojection_left[y, x, :] = left[y_new, x_new, :]
+    #     print("Finished synthesizing synth_{}.jpg".format(str(i).zfill(2)))
+    #     cv.imwrite(f'results/{set}/synth_' + str(i).zfill(2) + '.jpg', reprojection_left)
     
 if __name__ == "__main__":
+    # time the execution
+    start = time.default_timer()
     main()
+    stop = time.default_timer()
+    print('Time: ', stop - start)
