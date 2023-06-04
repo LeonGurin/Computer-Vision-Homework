@@ -5,8 +5,12 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 import argparse
 import timeit as time
+from compute_disp import computeDisp
+import cv2.ximgproc as xip
 
 WINDOW_SIZE = 9
+WINDOW_SIZE_X = 9
+WINDOW_SIZE_Y = 7
 BASELINE = 0.1
 
 MAX_DISP = None
@@ -35,6 +39,42 @@ def load_images(dir):
     right = cv.imread(str(dir / 'im_right.jpg'), cv.IMREAD_GRAYSCALE)
     return left, right
 
+def save_disparity_results(dir, left_disparity, right_disparity):
+    np.savetxt(str(dir / 'disp_left.txt'), left_disparity, delimiter=',', fmt='%d', newline='\n')
+    np.savetxt(str(dir / 'disp_right.txt'), right_disparity, delimiter=',', fmt='%d', newline='\n')
+    # normalize disparity map for visualization
+    normalized_left_disparity = cv.normalize(left_disparity, None, alpha=0, beta=255, norm_type=cv.NORM_MINMAX, dtype=cv.CV_8U)
+    normalized_right_disparity = cv.normalize(right_disparity, None, alpha=0, beta=255, norm_type=cv.NORM_MINMAX, dtype=cv.CV_8U)
+    cv.imwrite(str(dir / 'disp_left.jpg'), normalized_left_disparity)
+    cv.imwrite(str(dir / 'disp_right.jpg'), normalized_right_disparity)
+
+def save_depth_results(dir, depth_left, depth_right):
+    with open(dir / 'depth_left.txt', 'w') as f:
+        for i in range(depth_left.shape[0]):
+            for j in range(depth_left.shape[1]):
+                if j == depth_left.shape[1] - 1:
+                    f.write(str(depth_left[i, j]))
+                else:
+                    f.write(str(depth_left[i, j]) + ',')
+            f.write('\n')
+    with open(dir / 'depth_right.txt', 'w') as f:
+        for i in range(depth_right.shape[0]):
+            for j in range(depth_right.shape[1]):
+                if j == depth_right.shape[1] - 1:
+                    f.write(str(depth_right[i, j]))
+                else:
+                    f.write(str(depth_right[i, j]) + ',')
+            f.write('\n')
+
+    # # normalize depth map for visualization
+    # depth_left = cv.normalize(depth_left, None, alpha=0, beta=255, norm_type=cv.NORM_MINMAX, dtype=cv.CV_8U)
+    # depth_right = cv.normalize(depth_right, None, alpha=0, beta=255, norm_type=cv.NORM_MINMAX, dtype=cv.CV_8U)
+    # cv.imwrite(str(dir / 'depth_left.jpg'), depth_left)
+    # cv.imwrite(str(dir / 'depth_right.jpg'), depth_right)
+
+    cv.imwrite(str(dir / 'depth_left.jpg'), (depth_left / np.max(depth_left) * 255).astype(np.uint8))
+    cv.imwrite(str(dir / 'depth_right.jpg'), (depth_right / np.max(depth_right) * 255).astype(np.uint8))
+
 def census_transform2(img):
     h, w = img.shape
     pad = WINDOW_SIZE // 2
@@ -49,22 +89,19 @@ def census_transform2(img):
 
     return census
 
-# def census_transform_cv(img):
-#     h, w = img.shape
-#     census = cv.stereo.censusTransform(img)
-#     return census
-
 def census_transform(img):
     h, w = img.shape
-    half_window_size = WINDOW_SIZE // 2
-    img = np.pad(img, half_window_size, 'constant', constant_values=0)
+    img = np.pad(img, ((WINDOW_SIZE_Y//2, WINDOW_SIZE_Y//2), (WINDOW_SIZE_X//2, WINDOW_SIZE_X//2)), 'constant', constant_values=0)
     census = np.zeros((h, w), dtype=np.uint64)
 
-    for i in range(half_window_size, h - half_window_size):
-        for j in range(half_window_size, w - half_window_size):
+    start_x = WINDOW_SIZE_X // 2
+    start_y = WINDOW_SIZE_Y // 2
+
+    for i in range(start_x, h - start_x):
+        for j in range(start_y, w - start_y):
             binary = ''
-            for k in range(i - half_window_size, i + half_window_size + 1):
-                for l in range(j - half_window_size, j + half_window_size + 1):
+            for k in range(i - start_x, i + start_x + 1):
+                for l in range(j - start_y, j + start_y + 1):
                     if img[k, l] > img[i, j]:
                         binary += '1'
                     else:
@@ -86,11 +123,6 @@ def hamming_distance2(census, shifted_census):
     distance = np.sum(unpackbits(distance, num_bits=64), axis=-1)
     return distance
 
-# def hamming_distance2(census, shifted_census):
-#     distance = np.bitwise_xor(census, shifted_census).astype(np.uint8)
-#     distance = np.sum(np.unpackbits(distance, axis=-1), axis=-1)
-#     return distance
-
 def hamming_distance(left, right):
     h, w = right.shape
     hamming = np.zeros((h, w), dtype=np.uint16)
@@ -101,8 +133,8 @@ def hamming_distance(left, right):
 
 def cost_volume(left_census, right_census):
     h, w = left_census.shape
-    rtl_cost_volume = np.zeros((h, w, MAX_DISP), dtype=np.uint64)
-    ltr_cost_volume = np.zeros((h, w, MAX_DISP), dtype=np.uint64)
+    rtl_cost_volume = np.zeros((h, w, MAX_DISP), dtype=np.float32)
+    ltr_cost_volume = np.zeros((h, w, MAX_DISP), dtype=np.float32)
 
     for d in range(MAX_DISP):
         right_shifted = np.zeros((h, w), dtype=np.uint64)
@@ -119,56 +151,30 @@ def cost_volume(left_census, right_census):
 
     return ltr_cost_volume, rtl_cost_volume
 
-def aggregate_cost_volume(cost_volume1, cost_volume2, mask_size = (3, 3), sigma = 1):
+def aggregate_cost_volume(cost_volume1, cost_volume2, mask_size = (9, 9), sigma = 1):
     for i in range(MAX_DISP):
         cost_volume1[:, :, i] = cv.GaussianBlur(cost_volume1[:, :, i], mask_size, sigma)
         cost_volume2[:, :, i] = cv.GaussianBlur(cost_volume2[:, :, i], mask_size, sigma)
     
     return cost_volume1, cost_volume2
 
-def find_minimum_cost(aggregated_cost_volume):
-    h, w, d = aggregated_cost_volume.shape
-    disparity = np.zeros((h, w), dtype=np.uint64)
+def aggregate_cost_volume2(left_image, right_image, left_cost, right_cost):
+    sigma_r, sigma_s = 4, 11
+    wndw_size = -1 # calculate window size from spatial kernel
+    left_image = np.float32(left_image)
+    right_image = np.float32(right_image)
+    for d in range(MAX_DISP):
+        # left-to-right check
+        # fill left border with border_replicate
+        #l_cost = cv.copyMakeBorder(cost_volume1, 0, 0, d, 0, cv.BORDER_REPLICATE)
+        left_cost[:, :, d] = xip.jointBilateralFilter(left_image, left_cost[:, :, d], wndw_size, sigma_r, sigma_s)
+        # right-to-left check
+        # fill right border with border_replicate
+        #r_cost = cv2.copyMakeBorder(cost, 0, 0, 0, d, cv2.BORDER_REPLICATE)
+        right_cost[:, :, d] = xip.jointBilateralFilter(right_image, right_cost[:, :, d], wndw_size, sigma_r, sigma_s)
+    return left_cost, right_cost
 
-    for i in range(h):
-        for j in range(w):
-            disparity[i, j] = np.argmin(aggregated_cost_volume[i, j, :])
-
-    with open('test.txt', 'w') as f:
-        for i in range(disparity.shape[0]):
-            for j in range(disparity.shape[1]):
-                f.write(str(disparity[i, j]) + ',')
-            f.write('\n')
-        f.close()
-
-    # disparity = np.argmin(aggregated_cost_volume, axis=2)
-
-    return disparity
-
-def consistency_test(left_disparity, right_disparity, threshold = 10):
-    h, w = left_disparity.shape
-    original_left = left_disparity.copy()
-    original_right = right_disparity.copy()
-    left_consistency_mask = np.zeros((h, w), dtype=np.uint8)
-    right_consistency_mask = np.zeros((h, w), dtype=np.uint8)
-
-    for i in range(h):
-        for j in range(w):
-            mapped_val = j - original_left[i, j]
-            if mapped_val >= 0 and mapped_val < w:
-                if abs(original_left[i, j] - original_right[i, mapped_val]) > threshold:
-                    left_disparity[i, j] = 0
-                    right_disparity[i, mapped_val] = 0
-            
-            mapped_val = j + original_right[i, j]
-            if mapped_val >= 0 and mapped_val < w:
-                if abs(original_right[i, j] - original_left[i, mapped_val]) > threshold:
-                    right_disparity[i, j] = 0
-                    left_disparity[i, mapped_val] = 0
-    
-    return left_disparity, right_disparity
-
-def consistency_test2(left_disparity, right_disparity, direction):
+def consistency_test(left_disparity, right_disparity, direction):
     h, w = left_disparity.shape
     lr_check = np.zeros((h, w), dtype=np.float32)
     x, y = np.meshgrid(range(w),range(h))
@@ -182,7 +188,43 @@ def consistency_test2(left_disparity, right_disparity, direction):
     r_disp = right_disparity[y[mask1], r_x[mask1]]
     mask2 = (l_disp == r_disp) # check if DL(x,y) = DR(x-DL(x,y)) or DR(x,y) = DL(x+DR(x,y),y)
     lr_check[y[mask1][mask2], x[mask1][mask2]] = left_disparity[mask1][mask2]
-    return lr_check
+    # create mask for pixels that passed the consistency check
+    consistent_mask = np.zeros((h, w), dtype=np.uint8)
+    consistent_mask[y[mask1][mask2], x[mask1][mask2]] = 1
+    inconsistent_mask = np.logical_not(consistent_mask)
+    return lr_check, inconsistent_mask
+
+def hole_filling(disparity, hole_mask):
+    h, w = disparity.shape
+    x, y = np.meshgrid(range(w),range(h))
+
+    # Get the coordinates of inconsistent pixels
+    inconsistent_y = y[hole_mask]
+    inconsistent_x = x[hole_mask]
+
+    window_size = 17
+
+    for i in range(len(inconsistent_y)):
+        y_coord = inconsistent_y[i]
+        x_coord = inconsistent_x[i]
+
+        # Calculate the window boundaries based on the window_size
+        ymin = max(0, y_coord - window_size // 2)
+        ymax = min(h, y_coord + window_size // 2 + 1)
+        xmin = max(0, x_coord - window_size // 2)
+        xmax = min(w, x_coord + window_size // 2 + 1)
+
+        # Get the neighbors of the inconsistent pixel within the window
+        neighbors = disparity[ymin:ymax, xmin:xmax]
+
+        # Find the most common value among the neighbors
+        unique, counts = np.unique(neighbors, return_counts=True)
+        most_common_value = unique[np.argmax(counts)]
+
+        # Set the inconsistent pixel to the most common value
+        disparity[y_coord, x_coord] = most_common_value
+
+    return disparity
 
 def create_depth_map(disparity):
     h, w = disparity.shape
@@ -199,8 +241,27 @@ def create_depth_map(disparity):
 def create_depth_map2(disparity):
     non_zero_disparity = np.where(disparity != 0, disparity, 1)
     depth_map = (BASELINE * FOCAL_LENGTH) / non_zero_disparity
-    # depth_map[disparity == 0] = 0.0
+    #depth_map[disparity == 0] = 0.0
     return depth_map
+
+def create_3d_points(depth_map):
+    h, w = depth_map.shape
+    points_3d = np.zeros((h, w, 3), dtype=np.float32)
+
+    for y in range(h):
+        for x in range(w):
+            depth_value = depth_map[y, x]
+
+            # Convert pixel coordinates to homogeneous coordinates
+            homogeneous_point = np.array([x, y, 1])
+
+            # calculate the 3d point in camera coordinates
+            point = depth_value * np.matmul(np.linalg.inv(K), homogeneous_point)
+
+            # append the 3d point to the list of points
+            points_3d[y, x, :] = point
+
+    return points_3d
 
 def synthesize_image(i, left, pixel_3d_points, set):
     h, w, _ = left.shape
@@ -226,9 +287,7 @@ def synthesize_image(i, left, pixel_3d_points, set):
                     # synth_img[v, u, :] = left[point_2d[1], point_2d[0], :]
                     synth_img[point_2d[1], point_2d[0], :] = left[v, u, :]
                 
-    # Save the resulting image with the corresponding shift index
-    cv.imwrite(f"results/{set}/synth_{str(i).zfill(2)}.jpg", synth_img)
-    print("Finished synthesizing synth_{}.jpg".format(i))
+    return synth_img
     
 def arg_parser():
     parser = argparse.ArgumentParser(description="HW2 of Computer Vision 2023")
@@ -236,22 +295,14 @@ def arg_parser():
     parser.add_argument("-d", "--debug", action="store_true", default=False, help="Plot extra useful images.")
     return parser.parse_args()
 
-def main():
-    args = arg_parser()
-    if args.path is None:
-        # to be supported
-        exit(1)
-
-    set = os.path.basename(args.path)
-    dir = Path(args.path)
+def solve_set(set, dir, args):
     print(f"Solving for set: {str(set)}")
 
     left, right = load_images(dir)
     read_additional_data(dir)
-
     # calculate census transform
-    left_census = census_transform2(left)
-    right_census = census_transform2(right)
+    left_census = census_transform(left)
+    right_census = census_transform(right)
 
     if args.debug:
         print("finished census transform")
@@ -265,15 +316,15 @@ def main():
     if args.debug:
         print("finished cost volume")
         # normalize cost volume for visualization
-        leftToRight_cost_vol = cv.normalize(leftToRight_cost_vol, None, alpha=0, beta=255, norm_type=cv.NORM_MINMAX, dtype=cv.CV_8U)
-        rightToLeft_cost_vol = cv.normalize(rightToLeft_cost_vol, None, alpha=0, beta=255, norm_type=cv.NORM_MINMAX, dtype=cv.CV_8U)
+        normalized_ltr_cost_vol = cv.normalize(leftToRight_cost_vol[:, :, MAX_DISP-1], None, alpha=0, beta=255, norm_type=cv.NORM_MINMAX)
+        normalized_rtl_cost_vol = cv.normalize(rightToLeft_cost_vol[:, :, MAX_DISP-1], None, alpha=0, beta=255, norm_type=cv.NORM_MINMAX)
         # save cost volume
-        cv.imwrite(f'debug/{set}/leftToRight_cost_vol_{MAX_DISP-1}.jpg', leftToRight_cost_vol[:, :, MAX_DISP-1])
-        cv.imwrite(f'debug/{set}/rightToLeft_cost_vol_{MAX_DISP-1}.jpg', rightToLeft_cost_vol[:, :, MAX_DISP-1])
+        cv.imwrite(f'debug/{set}/leftToRight_cost_vol_{MAX_DISP-1}.jpg', normalized_ltr_cost_vol)
+        cv.imwrite(f'debug/{set}/rightToLeft_cost_vol_{MAX_DISP-1}.jpg', normalized_rtl_cost_vol)
 
     # aggregate cost volume
-    leftToRight_aggregated_cost_vol, rightToLeft_aggregated_cost_vol = aggregate_cost_volume(leftToRight_cost_vol, rightToLeft_cost_vol)
-
+    #leftToRight_aggregated_cost_vol, rightToLeft_aggregated_cost_vol = aggregate_cost_volume(leftToRight_cost_vol, rightToLeft_cost_vol)
+    leftToRight_aggregated_cost_vol, rightToLeft_aggregated_cost_vol = aggregate_cost_volume2(left, right, leftToRight_cost_vol, rightToLeft_cost_vol)
     # find minimum cost
     leftToRight_disparity = np.argmin(leftToRight_aggregated_cost_vol, axis=2)
     rightToLeft_disparity = np.argmin(rightToLeft_aggregated_cost_vol, axis=2)
@@ -281,76 +332,93 @@ def main():
     # rightToLeft_disparity = find_minimum_cost(rightToLeft_aggregated_cost_vol)
 
     print("finished calculating disparity map")
+    if args.debug:
+        # normalize disparity map for visualization
+        normalized_ltr_disparity = cv.normalize(leftToRight_disparity, None, alpha=0, beta=255, norm_type=cv.NORM_MINMAX)
+        normalized_rtl_disparity = cv.normalize(rightToLeft_disparity, None, alpha=0, beta=255, norm_type=cv.NORM_MINMAX)
+        # save disparity map
+        cv.imwrite(f'debug/{set}/left_disp_not_consistent.jpg', normalized_ltr_disparity)
+        cv.imwrite(f'debug/{set}/right_disp_not_consistent.jpg', normalized_rtl_disparity)
 
     # filter with consistency test
     #leftToRight_disparity, rightToLeft_disparity = consistency_test(leftToRight_disparity, rightToLeft_disparity)
-    leftToRight_disparity = consistency_test2(leftToRight_disparity, rightToLeft_disparity, direction='left')
-    rightToLeft_disparity = consistency_test2(rightToLeft_disparity, leftToRight_disparity, direction='right')
+    leftToRight_disparity, left_inconsistent_mask = consistency_test(leftToRight_disparity, rightToLeft_disparity, direction='left')
+    rightToLeft_disparity, right_inconsistent_mask = consistency_test(rightToLeft_disparity, leftToRight_disparity, direction='right')
     print("finished consistency test")
-    
+
     # create depth map
     depth_left = create_depth_map(leftToRight_disparity)
     depth_right = create_depth_map(rightToLeft_disparity)
 
     print("finished calculating depth map")
 
-    np.savetxt(f'results/{set}/disp_left.txt', leftToRight_disparity, delimiter=',', fmt='%d', newline='\n')
-    np.savetxt(f'results/{set}/disp_right.txt', rightToLeft_disparity, delimiter=',', fmt='%d', newline='\n')
-    with open(f'results/{set}/depth_left.txt', 'w') as f:
-        for i in range(depth_left.shape[0]):
-            for j in range(depth_left.shape[1]):
-                if j == depth_left.shape[1] - 1:
-                    f.write(str(depth_left[i, j]))
-                else:
-                    f.write(str(depth_left[i, j]) + ',')
-            f.write('\n')
-        f.close()
-    with open(f'results/{set}/depth_right.txt', 'w') as f:
-        for i in range(depth_right.shape[0]):
-            for j in range(depth_right.shape[1]):
-                if j == depth_right.shape[1] - 1:
-                    f.write(str(depth_right[i, j]))
-                else:
-                    f.write(str(depth_right[i, j]) + ',')
-            f.write('\n')
-        f.close()
-
-    # normalize disparity map for visualization
-    leftToRight_disparity = cv.normalize(leftToRight_disparity, None, alpha=0, beta=255, norm_type=cv.NORM_MINMAX, dtype=cv.CV_8U)
-    rightToLeft_disparity = cv.normalize(rightToLeft_disparity, None, alpha=0, beta=255, norm_type=cv.NORM_MINMAX, dtype=cv.CV_8U)
-    # normalize depth map for visualization
-    depth_left = cv.normalize(depth_left, None, alpha=0, beta=255, norm_type=cv.NORM_MINMAX, dtype=cv.CV_8U)
-    depth_right = cv.normalize(depth_right, None, alpha=0, beta=255, norm_type=cv.NORM_MINMAX, dtype=cv.CV_8U)
-
-    # save images
-    os.makedirs(f'results/{set}', exist_ok=True)
-    cv.imwrite(f'results/{set}/disp_left.jpg', leftToRight_disparity)
-    cv.imwrite(f'results/{set}/disp_right.jpg', rightToLeft_disparity)
-    cv.imwrite(f'results/{set}/depth_left.jpg', depth_left)
-    cv.imwrite(f'results/{set}/depth_right.jpg', depth_right)
-
-    # np.savetxt(f'results/{set}/depth_left.txt', depth_left, delimiter=',', fmt='%f', newline='\n')
-    # np.savetxt(f'results/{set}/depth_right.txt', depth_right, delimiter=',', fmt='%f', newline='\n')
+    # save results
+    results_dir = Path("results", set)
+    os.makedirs(results_dir, exist_ok=True)
+    save_disparity_results(results_dir, leftToRight_disparity, rightToLeft_disparity)
+    save_depth_results(results_dir, depth_left, depth_right)
 
     # calculate reprojection using depth map D and intrinsics matrix K
-    left_colored = cv.imread(f'{set}/im_left.jpg', cv.IMREAD_COLOR)
-    h, w = left_colored.shape[:2]
+    left_colored = cv.imread(f'{dir}/im_left.jpg', cv.IMREAD_COLOR)
 
-    pixel_3d_points = np.zeros((h, w, 3), dtype=np.float32)
-
-    # Synthesize 3D points onto the camera with the shifted extrinsic matrix
-    for v in range(h):
-        for u in range(w):
-            depth = depth_left[v, u]
-
-            pixel_homogeneous = np.array([[u, v, 1]])
-            pixel_3d_cam_shifted = np.dot(np.linalg.inv(K), pixel_homogeneous.T) * depth
-
-            pixel_3d_points[v, u, :] = pixel_3d_cam_shifted.T
+    pixel_3d_points = create_3d_points(depth_left)
 
     for i in range(0,12):
-        synthesize_image(i, left_colored, pixel_3d_points, set)
+        synth_img = synthesize_image(i, left_colored, pixel_3d_points, set)
+        # Save the synthesized image
+        cv.imwrite(str(results_dir / f"synth_{str(i).zfill(2)}.jpg"), synth_img)
+        print("Finished synthesizing synth_{}.jpg".format(i))
 
+    # bonus
+    print("Calculating bonus")
+    # hole filling
+    bonus_ltr_disparity = hole_filling(leftToRight_disparity, left_inconsistent_mask)
+    bonus_rtl_disparity = hole_filling(rightToLeft_disparity, right_inconsistent_mask)
+
+    # create depth map
+    bonus_depth_left = create_depth_map(bonus_ltr_disparity)
+    bonus_depth_right = create_depth_map(bonus_rtl_disparity)
+
+    # save results
+    bonus_results_dir = results_dir / "bonus"
+    os.makedirs(bonus_results_dir, exist_ok=True)
+    save_disparity_results(bonus_results_dir, bonus_ltr_disparity, bonus_rtl_disparity)
+    save_depth_results(bonus_results_dir, bonus_depth_left, bonus_depth_right)
+
+    # calculate reprojections
+    bonus_pixel_3d_points = create_3d_points(bonus_depth_left)
+
+    for i in range(0,12):
+        synth_img = synthesize_image(i, left_colored, bonus_pixel_3d_points, set)
+        # Save the synthesized image
+        cv.imwrite(str(bonus_results_dir / f"synth_{str(i).zfill(2)}.jpg"), synth_img)
+        print("Finished synthesizing synth_{}.jpg".format(i))
+
+
+def main():
+    args = arg_parser()
+    sets = []
+    if args.path is None:
+        # solve all sets
+        for path in os.listdir("data"):
+            path = os.path.join("data", path)
+            if os.path.isdir(path):
+                sets.append(path)
+    else:
+        # solve only the given set
+        if os.path.isdir(args.path):
+            sets.append(args.path)
+    for path in sets:
+        set = os.path.basename(path)
+        dir = Path(path)
+        # time the execution
+        start = time.default_timer()
+        solve_set(set, dir, args)
+        stop = time.default_timer()
+        print('Time: ', stop - start)
+
+    
+"""
 # _________________________________________________________________
 
     # h, w = depth_left.shape
@@ -398,10 +466,11 @@ def main():
     #                     # reprojection_left[y, x, :] = left[y_new, x_new, :]
     #     print("Finished synthesizing synth_{}.jpg".format(str(i).zfill(2)))
     #     cv.imwrite(f'results/{set}/synth_' + str(i).zfill(2) + '.jpg', reprojection_left)
-    
+"""
+
 if __name__ == "__main__":
     # time the execution
     start = time.default_timer()
     main()
     stop = time.default_timer()
-    print('Time: ', stop - start)
+    print('Total time: ', stop - start)
