@@ -226,6 +226,31 @@ def hole_filling(disparity, hole_mask):
 
     return disparity
 
+def hole_filling2(image, disparity, hole_mask):
+    h, w = disparity.shape
+    # pad maximum disparity for the holes in boundary
+    lr_check_pad = cv.copyMakeBorder(disparity, 0,0,1,1, cv.BORDER_CONSTANT, value=MAX_DISP)
+    l_labels = np.zeros((h, w), dtype=np.float32)
+    r_labels = np.zeros((h, w), dtype=np.float32)
+    for y in range(h):
+        for x in range(w):
+            idx_L, idx_R = 0, 0
+            # 𝐹𝐿, the disparity map filled by closest valid disparity from left
+            while lr_check_pad[y, x+1-idx_L] == 0:
+                idx_L += 1
+            l_labels[y, x] = lr_check_pad[y, x+1-idx_L]
+            # 𝐹𝑅, the disparity map filled by closest valid disparity from right
+            while lr_check_pad[y, x+1+idx_R] == 0:
+                idx_R += 1
+            r_labels[y, x] = lr_check_pad[y, x+1+idx_R]
+    # Final filled disparity map 𝐷 = min(𝐹𝐿 , 𝐹𝑅) (pixel-wise minimum)
+    labels = np.min((l_labels, r_labels), axis=0)
+
+    # weighted median filter
+    WMF_r = 11
+    labels = xip.weightedMedianFilter(image.astype(np.uint8), labels, WMF_r)
+    return labels
+
 def create_depth_map(disparity):
     h, w = disparity.shape
     depth_map = np.zeros((h, w), dtype=np.float32)
@@ -263,14 +288,18 @@ def create_3d_points(depth_map):
 
     return points_3d
 
-def synthesize_image(i, left, pixel_3d_points, set):
+def synthesize_image(i, left, pixel_3d_points, set, direction="left"):
     h, w, _ = left.shape
-    t[0, 0] = -i * 0.01
+    if direction == "left":
+        t[0, 0] = -i * 0.01
+    else:
+        t[0, 0] = i * 0.01
     extrinsic_matrix_shifted = np.hstack((R, t))
     P = np.dot(K, extrinsic_matrix_shifted)
     # print(extrinsic_matrix_shifted)
     
     synth_img = np.zeros_like(left)
+    filled_mask = np.zeros((h, w), dtype=np.uint8)
 
     for v in range(h):
         for u in range(w):
@@ -281,13 +310,15 @@ def synthesize_image(i, left, pixel_3d_points, set):
             
             if pixel_2d_cam_shifted[2] != 0:
                 pixel_2d_cam_shifted = pixel_2d_cam_shifted / pixel_2d_cam_shifted[2]
-                point_2d = np.round(pixel_2d_cam_shifted[:2]).astype(int)
+                point_2d = np.round(pixel_2d_cam_shifted[:2]).astype(np.uint16)
 
                 if 0 <= point_2d[1] < h and 0 <= point_2d[0] < w:
                     # synth_img[v, u, :] = left[point_2d[1], point_2d[0], :]
                     synth_img[point_2d[1], point_2d[0], :] = left[v, u, :]
+                    filled_mask[point_2d[1], point_2d[0]] = 1
+    holes_mask = np.logical_not(filled_mask)
                 
-    return synth_img
+    return synth_img, holes_mask
     
 def arg_parser():
     parser = argparse.ArgumentParser(description="HW2 of Computer Vision 2023")
@@ -360,20 +391,21 @@ def solve_set(set, dir, args):
 
     # calculate reprojection using depth map D and intrinsics matrix K
     left_colored = cv.imread(f'{dir}/im_left.jpg', cv.IMREAD_COLOR)
+    right_colored = cv.imread(f'{dir}/im_right.jpg', cv.IMREAD_COLOR)
 
     pixel_3d_points = create_3d_points(depth_left)
 
     for i in range(0,12):
-        synth_img = synthesize_image(i, left_colored, pixel_3d_points, set)
+        synth_img, _ = synthesize_image(i, left_colored, pixel_3d_points, set)
         # Save the synthesized image
         cv.imwrite(str(results_dir / f"synth_{str(i).zfill(2)}.jpg"), synth_img)
-        print("Finished synthesizing synth_{}.jpg".format(i))
+        print(f"Finished synthesizing synth_{i}.jpg")
 
     # bonus
     print("Calculating bonus")
     # hole filling
-    bonus_ltr_disparity = hole_filling(leftToRight_disparity, left_inconsistent_mask)
-    bonus_rtl_disparity = hole_filling(rightToLeft_disparity, right_inconsistent_mask)
+    bonus_ltr_disparity = hole_filling2(left, leftToRight_disparity, left_inconsistent_mask)
+    bonus_rtl_disparity = hole_filling2(right, rightToLeft_disparity, right_inconsistent_mask)
 
     # create depth map
     bonus_depth_left = create_depth_map(bonus_ltr_disparity)
@@ -386,13 +418,21 @@ def solve_set(set, dir, args):
     save_depth_results(bonus_results_dir, bonus_depth_left, bonus_depth_right)
 
     # calculate reprojections
-    bonus_pixel_3d_points = create_3d_points(bonus_depth_left)
+    bonus_left_pixel_3d_points = create_3d_points(bonus_depth_left)
+    bonus_right_pixel_3d_points = create_3d_points(bonus_depth_right)
 
     for i in range(0,12):
-        synth_img = synthesize_image(i, left_colored, bonus_pixel_3d_points, set)
+        left_synth_img, left_holes_mask = synthesize_image(i, left_colored, bonus_left_pixel_3d_points, set, direction='left')
+        right_synth_img, right_holes_mask = synthesize_image(i, right_colored, bonus_right_pixel_3d_points, set, direction='right')
+        left_holes_mask_3ch = np.stack((left_holes_mask, left_holes_mask, left_holes_mask), axis=-1)
+        synth_img = left_synth_img + right_synth_img * left_holes_mask_3ch
         # Save the synthesized image
         cv.imwrite(str(bonus_results_dir / f"synth_{str(i).zfill(2)}.jpg"), synth_img)
-        print("Finished synthesizing synth_{}.jpg".format(i))
+        print(f"Finished synthesizing synth_{i}.jpg")
+        if args.debug:
+            # visualize holes mask
+            cv.imwrite(f'debug/{set}/left_holes_mask_{i}.jpg', left_holes_mask * 255)
+            cv.imwrite(f'debug/{set}/right_holes_mask_{i}.jpg', right_holes_mask * 255)
 
 
 def main():
