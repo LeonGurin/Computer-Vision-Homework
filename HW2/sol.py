@@ -5,10 +5,8 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 import argparse
 import timeit as time
-from compute_disp import computeDisp
 import cv2.ximgproc as xip
 
-WINDOW_SIZE = 9
 WINDOW_SIZE_X = 9
 WINDOW_SIZE_Y = 7
 BASELINE = 0.1
@@ -65,29 +63,12 @@ def save_depth_results(dir, depth_left, depth_right):
                 else:
                     f.write(str(depth_right[i, j]) + ',')
             f.write('\n')
-
-    # # normalize depth map for visualization
-    # depth_left = cv.normalize(depth_left, None, alpha=0, beta=255, norm_type=cv.NORM_MINMAX, dtype=cv.CV_8U)
-    # depth_right = cv.normalize(depth_right, None, alpha=0, beta=255, norm_type=cv.NORM_MINMAX, dtype=cv.CV_8U)
-    # cv.imwrite(str(dir / 'depth_left.jpg'), depth_left)
-    # cv.imwrite(str(dir / 'depth_right.jpg'), depth_right)
-
-    cv.imwrite(str(dir / 'depth_left.jpg'), (depth_left / np.max(depth_left) * 255).astype(np.uint8))
-    cv.imwrite(str(dir / 'depth_right.jpg'), (depth_right / np.max(depth_right) * 255).astype(np.uint8))
-
-def census_transform2(img):
-    h, w = img.shape
-    pad = WINDOW_SIZE // 2
-    img_padded = np.pad(img, pad, 'constant', constant_values=0)
-    
-    shifts = [(i, j) for i in range(-pad, pad + 1) for j in range(-pad, pad + 1) if (i, j) != (0, 0)]
-    census = np.zeros((h, w), dtype=np.uint64)
-
-    for i, j in shifts:
-        binary = (img_padded[pad + i:h + pad + i, pad + j:w + pad + j] > img).astype(np.uint64)
-        census = (census << 1) | binary
-
-    return census
+    depth_left = depth_left / np.min(np.max(depth_left), 10) * 255
+    depth_left[depth_left > 255] = 255
+    depth_right = depth_right / np.min(np.max(depth_right), 10) * 255
+    depth_right[depth_right > 255] = 255
+    cv.imwrite(str(dir / 'depth_left.jpg'), (depth_left).astype(np.uint8))
+    cv.imwrite(str(dir / 'depth_right.jpg'), (depth_right).astype(np.uint8))
 
 def census_transform(img):
     h, w = img.shape
@@ -109,19 +90,6 @@ def census_transform(img):
             census[i, j] = int(binary, 2)
 
     return census
-
-def unpackbits(x, num_bits):
-    if np.issubdtype(x.dtype, np.floating):
-        raise ValueError("numpy data type needs to be int-like")
-    xshape = list(x.shape)
-    x = x.reshape([-1, 1])
-    mask = 2**np.arange(num_bits, dtype=x.dtype).reshape([1, num_bits])
-    return (x & mask).astype(bool).astype(int).reshape(xshape + [num_bits])
-
-def hamming_distance2(census, shifted_census):
-    distance = np.bitwise_xor(census, shifted_census).astype(np.uint64)
-    distance = np.sum(unpackbits(distance, num_bits=64), axis=-1)
-    return distance
 
 def hamming_distance(left, right):
     h, w = right.shape
@@ -146,35 +114,23 @@ def cost_volume(left_census, right_census):
             right_shifted[:, d:] = right_census[:, :-d]
             left_shifted[:, :-d] = left_census[:, d:]
 
-        ltr_cost_volume[:, :, d] = hamming_distance2(left_census, right_shifted)
-        rtl_cost_volume[:, :, d] = hamming_distance2(right_census, left_shifted)
+        ltr_cost_volume[:, :, d] = hamming_distance(left_census, right_shifted)
+        rtl_cost_volume[:, :, d] = hamming_distance(right_census, left_shifted)
 
     return ltr_cost_volume, rtl_cost_volume
 
-def aggregate_cost_volume(cost_volume1, cost_volume2, mask_size = (9, 9), sigma = 1):
-    for i in range(MAX_DISP):
-        cost_volume1[:, :, i] = cv.GaussianBlur(cost_volume1[:, :, i], mask_size, sigma)
-        cost_volume2[:, :, i] = cv.GaussianBlur(cost_volume2[:, :, i], mask_size, sigma)
-    
-    return cost_volume1, cost_volume2
-
-def aggregate_cost_volume2(left_image, right_image, left_cost, right_cost):
+def aggregate_cost_volume(left_image, right_image, left_cost, right_cost):
     sigma_r, sigma_s = 4, 11
     wndw_size = -1 # calculate window size from spatial kernel
     left_image = np.float32(left_image)
     right_image = np.float32(right_image)
     for d in range(MAX_DISP):
-        # left-to-right check
-        # fill left border with border_replicate
-        #l_cost = cv.copyMakeBorder(cost_volume1, 0, 0, d, 0, cv.BORDER_REPLICATE)
+        # a joint bilateral filter is applied to each disparity level
         left_cost[:, :, d] = xip.jointBilateralFilter(left_image, left_cost[:, :, d], wndw_size, sigma_r, sigma_s)
-        # right-to-left check
-        # fill right border with border_replicate
-        #r_cost = cv2.copyMakeBorder(cost, 0, 0, 0, d, cv2.BORDER_REPLICATE)
         right_cost[:, :, d] = xip.jointBilateralFilter(right_image, right_cost[:, :, d], wndw_size, sigma_r, sigma_s)
     return left_cost, right_cost
 
-def consistency_test(left_disparity, right_disparity, direction):
+def consistency_test(left_disparity, right_disparity, direction, threshold=1):
     h, w = left_disparity.shape
     lr_check = np.zeros((h, w), dtype=np.float32)
     x, y = np.meshgrid(range(w),range(h))
@@ -186,7 +142,8 @@ def consistency_test(left_disparity, right_disparity, direction):
         mask1 = (r_x < w) # coordinate should be less than image width
     l_disp = left_disparity[mask1]
     r_disp = right_disparity[y[mask1], r_x[mask1]]
-    mask2 = (l_disp == r_disp) # check if DL(x,y) = DR(x-DL(x,y)) or DR(x,y) = DL(x+DR(x,y),y)
+    # mask2 = (l_disp == r_disp) # check if DL(x,y) = DR(x-DL(x,y)) or DR(x,y) = DL(x+DR(x,y),y)
+    mask2 = (np.abs(l_disp - r_disp) < threshold)
     lr_check[y[mask1][mask2], x[mask1][mask2]] = left_disparity[mask1][mask2]
     # create mask for pixels that passed the consistency check
     consistent_mask = np.zeros((h, w), dtype=np.uint8)
@@ -194,39 +151,7 @@ def consistency_test(left_disparity, right_disparity, direction):
     inconsistent_mask = np.logical_not(consistent_mask)
     return lr_check, inconsistent_mask
 
-def hole_filling(disparity, hole_mask):
-    h, w = disparity.shape
-    x, y = np.meshgrid(range(w),range(h))
-
-    # Get the coordinates of inconsistent pixels
-    inconsistent_y = y[hole_mask]
-    inconsistent_x = x[hole_mask]
-
-    window_size = 17
-
-    for i in range(len(inconsistent_y)):
-        y_coord = inconsistent_y[i]
-        x_coord = inconsistent_x[i]
-
-        # Calculate the window boundaries based on the window_size
-        ymin = max(0, y_coord - window_size // 2)
-        ymax = min(h, y_coord + window_size // 2 + 1)
-        xmin = max(0, x_coord - window_size // 2)
-        xmax = min(w, x_coord + window_size // 2 + 1)
-
-        # Get the neighbors of the inconsistent pixel within the window
-        neighbors = disparity[ymin:ymax, xmin:xmax]
-
-        # Find the most common value among the neighbors
-        unique, counts = np.unique(neighbors, return_counts=True)
-        most_common_value = unique[np.argmax(counts)]
-
-        # Set the inconsistent pixel to the most common value
-        disparity[y_coord, x_coord] = most_common_value
-
-    return disparity
-
-def hole_filling2(image, disparity, hole_mask):
+def hole_filling(image, disparity, hole_mask):
     h, w = disparity.shape
     # pad maximum disparity for the holes in boundary
     lr_check_pad = cv.copyMakeBorder(disparity, 0,0,1,1, cv.BORDER_CONSTANT, value=MAX_DISP)
@@ -261,12 +186,6 @@ def create_depth_map(disparity):
             else:
                 depth_map[i, j] = 0.0
     
-    return depth_map
-
-def create_depth_map2(disparity):
-    non_zero_disparity = np.where(disparity != 0, disparity, 1)
-    depth_map = (BASELINE * FOCAL_LENGTH) / non_zero_disparity
-    #depth_map[disparity == 0] = 0.0
     return depth_map
 
 def create_3d_points(depth_map):
@@ -354,13 +273,11 @@ def solve_set(set, dir, args):
         cv.imwrite(f'debug/{set}/rightToLeft_cost_vol_{MAX_DISP-1}.jpg', normalized_rtl_cost_vol)
 
     # aggregate cost volume
-    #leftToRight_aggregated_cost_vol, rightToLeft_aggregated_cost_vol = aggregate_cost_volume(leftToRight_cost_vol, rightToLeft_cost_vol)
-    leftToRight_aggregated_cost_vol, rightToLeft_aggregated_cost_vol = aggregate_cost_volume2(left, right, leftToRight_cost_vol, rightToLeft_cost_vol)
+    leftToRight_aggregated_cost_vol, rightToLeft_aggregated_cost_vol = aggregate_cost_volume(left, right, leftToRight_cost_vol, rightToLeft_cost_vol)
     # find minimum cost
     leftToRight_disparity = np.argmin(leftToRight_aggregated_cost_vol, axis=2)
     rightToLeft_disparity = np.argmin(rightToLeft_aggregated_cost_vol, axis=2)
-    # leftToRight_disparity = find_minimum_cost(leftToRight_aggregated_cost_vol)
-    # rightToLeft_disparity = find_minimum_cost(rightToLeft_aggregated_cost_vol)
+
 
     print("finished calculating disparity map")
     if args.debug:
@@ -395,17 +312,17 @@ def solve_set(set, dir, args):
 
     pixel_3d_points = create_3d_points(depth_left)
 
-    for i in range(0,12):
+    for i in range(0,11):
         synth_img, _ = synthesize_image(i, left_colored, pixel_3d_points, set)
         # Save the synthesized image
-        cv.imwrite(str(results_dir / f"synth_{str(i).zfill(2)}.jpg"), synth_img)
-        print(f"Finished synthesizing synth_{i}.jpg")
+        cv.imwrite(str(results_dir / f"synth_{str(i+1).zfill(2)}.jpg"), synth_img)
+        print(f"Finished synthesizing synth_{i+1}.jpg")
 
     # bonus
     print("Calculating bonus")
     # hole filling
-    bonus_ltr_disparity = hole_filling2(left, leftToRight_disparity, left_inconsistent_mask)
-    bonus_rtl_disparity = hole_filling2(right, rightToLeft_disparity, right_inconsistent_mask)
+    bonus_ltr_disparity = hole_filling(left, leftToRight_disparity, left_inconsistent_mask)
+    bonus_rtl_disparity = hole_filling(right, rightToLeft_disparity, right_inconsistent_mask)
 
     # create depth map
     bonus_depth_left = create_depth_map(bonus_ltr_disparity)
@@ -421,18 +338,20 @@ def solve_set(set, dir, args):
     bonus_left_pixel_3d_points = create_3d_points(bonus_depth_left)
     bonus_right_pixel_3d_points = create_3d_points(bonus_depth_right)
 
-    for i in range(0,12):
+    for i in range(0,11):
         left_synth_img, left_holes_mask = synthesize_image(i, left_colored, bonus_left_pixel_3d_points, set, direction='left')
-        right_synth_img, right_holes_mask = synthesize_image(i, right_colored, bonus_right_pixel_3d_points, set, direction='right')
+        right_synth_img, right_holes_mask = synthesize_image(10-i, right_colored, bonus_right_pixel_3d_points, set, direction='right')
         left_holes_mask_3ch = np.stack((left_holes_mask, left_holes_mask, left_holes_mask), axis=-1)
         synth_img = left_synth_img + right_synth_img * left_holes_mask_3ch
+        # apply median filter on pixels that are holes
+        synth_img = left_synth_img + cv.medianBlur(synth_img, 3) * left_holes_mask_3ch
         # Save the synthesized image
-        cv.imwrite(str(bonus_results_dir / f"synth_{str(i).zfill(2)}.jpg"), synth_img)
-        print(f"Finished synthesizing synth_{i}.jpg")
+        cv.imwrite(str(bonus_results_dir / f"synth_{str(i+1).zfill(2)}.jpg"), synth_img)
+        print(f"Finished synthesizing synth_{i+1}.jpg")
         if args.debug:
             # visualize holes mask
-            cv.imwrite(f'debug/{set}/left_holes_mask_{i}.jpg', left_holes_mask * 255)
-            cv.imwrite(f'debug/{set}/right_holes_mask_{i}.jpg', right_holes_mask * 255)
+            cv.imwrite(f'debug/{set}/left_holes_mask_{i+1}.jpg', left_holes_mask * 255)
+            cv.imwrite(f'debug/{set}/right_holes_mask_{i+1}.jpg', right_holes_mask * 255)
 
 
 def main():
@@ -458,56 +377,6 @@ def main():
         print('Time: ', stop - start)
 
     
-"""
-# _________________________________________________________________
-
-    # h, w = depth_left.shape
-    # reprojection_left = np.zeros((h, w, 3), dtype=np.float32)
-
-    # left = cv.imread(str(dir / 'im_left.jpg'), cv.IMREAD_COLOR)
-
-    # reprojection_points_left = np.zeros((h, w, 3), dtype=np.float32)
-    # for y in range(h):
-    #     for x in range(w):
-    #         depth_value_left = depth_left[y, x]
-
-    #         # Convert pixel coordinates to homogeneous coordinates
-    #         homogeneous_point = np.array([x, y, 1])
-
-    #         # calculate the 3d point in camera coordinates
-    #         point_left = depth_value_left * np.matmul(np.linalg.inv(K), homogeneous_point)
-
-    #         # append the 3d point to the list of points
-    #         reprojection_points_left[y, x, :] = point_left
-
-    # # synthesize new images by projecting the 3d points back to the image plane 
-    # # using the camera matrix K and the rotation matrix R
-    # # translate each time 1 cm along the x-axis
-    # # also get the RGB values from the original image and assign them to the new image
-
-    # for i in range(12):
-    #     t[0, 0] = i * 0.01
-    #     P = np.matmul(K, np.hstack((R, t)))
-    #     for y in range(h):
-    #         for x in range(w):
-    #             point_left = reprojection_points_left[y, x, :]
-    #             # point_left = np.hstack((point_left, 1))
-    #             # point_left = point_left.reshape((4, 1))
-    #             point_left = point_left.reshape((3, 1))
-    #             point_left = np.matmul(R, point_left) + t
-    #             point_left = np.matmul(K, point_left)
-    #             # point_left = np.matmul(P, point_left)
-    #             if point_left[2, 0] != 0:
-    #                 point_left = point_left / point_left[2, 0]
-    #                 x_new = int(point_left[0, 0])
-    #                 y_new = int(point_left[1, 0])
-    #                 if x_new >= 0 and x_new < w and y_new >= 0 and y_new < h:
-    #                     reprojection_left[y_new, x_new, :] = left[y, x, :]
-    #                     # reprojection_left[y, x, :] = left[y_new, x_new, :]
-    #     print("Finished synthesizing synth_{}.jpg".format(str(i).zfill(2)))
-    #     cv.imwrite(f'results/{set}/synth_' + str(i).zfill(2) + '.jpg', reprojection_left)
-"""
-
 if __name__ == "__main__":
     # time the execution
     start = time.default_timer()
