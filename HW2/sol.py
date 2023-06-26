@@ -63,10 +63,12 @@ def save_depth_results(dir, depth_left, depth_right):
                 else:
                     f.write(str(depth_right[i, j]) + ',')
             f.write('\n')
-    depth_left = depth_left / np.min(np.max(depth_left), 10) * 255
-    depth_left[depth_left > 255] = 255
-    depth_right = depth_right / np.min(np.max(depth_right), 10) * 255
-    depth_right[depth_right > 255] = 255
+    # depth_left = depth_left / np.min(np.max(depth_left), 10) * 255
+    # depth_left[depth_left > 255] = 255
+    # depth_right = depth_right / np.min(np.max(depth_right), 10) * 255
+    # depth_right[depth_right > 255] = 255
+    depth_left = depth_left / np.max(depth_left) * 255
+    depth_right = depth_right / np.max(depth_right) * 255
     cv.imwrite(str(dir / 'depth_left.jpg'), (depth_left).astype(np.uint8))
     cv.imwrite(str(dir / 'depth_right.jpg'), (depth_right).astype(np.uint8))
 
@@ -181,7 +183,7 @@ def create_depth_map(disparity):
     depth_map = np.zeros((h, w), dtype=np.float32)
     for i in range(h):
         for j in range(w):
-            if disparity[i, j] != 0:
+            if disparity[i, j] > 1:
                 depth_map[i, j] = (BASELINE * FOCAL_LENGTH) / disparity[i, j]
             else:
                 depth_map[i, j] = 0.0
